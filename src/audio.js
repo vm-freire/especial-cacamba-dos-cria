@@ -234,8 +234,9 @@ export class MicPipeline {
       numberOfOutputs: 1,
       outputChannelCount: [1],
       processorOptions: {
-        // os ajustes que o Igão usa no app dele: trap pesado, +1 semitom, ganho +10 dB, volume +12 dB, redução 100%
-        params: { ativo: true, tom: 0, escala: 'menor', velocidade: 0, intensidade: 1, transpor: 1, voz: 'media', ganhoEntrada: 3.1623, volume: 3.9811, reducaoRuido: 1 },
+        // trap pesado do Igão (+1 semitom, redução 100%), mas sem o ganho de +22 dB do app dele: aqui o mic já chega
+        // no nível certo e aquele ganho levantava o ruído de fundo e estourava. Volume +4 dB.
+        params: { ativo: true, tom: 0, escala: 'menor', velocidade: 0, intensidade: 1, transpor: 1, voz: 'media', ganhoEntrada: 1, volume: 1.585, reducaoRuido: 1 },
       },
     });
     const graves = ctx.createBiquadFilter();
@@ -288,7 +289,7 @@ export class MicPipeline {
     escuro.connect(mix);
     // limitador no fim: com o ganho alto do Igão, reverb + delay somados passariam de 0 dB e estourariam
     const nivel = ctx.createGain();
-    nivel.gain.value = 0.8;
+    nivel.gain.value = 1;
     const limite = ctx.createDynamicsCompressor();
     limite.threshold.value = -4;
     limite.knee.value = 2;
