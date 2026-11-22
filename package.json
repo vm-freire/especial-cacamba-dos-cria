@@ -1,0 +1,67 @@
+{
+  "name": "especial-cacamba-dos-cria",
+  "productName": "Especial Caçamba dos Cria",
+  "version": "1.0.0",
+  "description": "Chamada de voz, compartilhamento de tela e soundboard só para os cria.",
+  "main": "main.js",
+  "author": "Vitor Freire",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vm-freire/especial-cacamba-dos-cria.git"
+  },
+  "scripts": {
+    "build:renderer": "esbuild src/app.js --bundle --format=esm --target=chrome120 --outfile=dist/app.js --minify --sourcemap",
+    "start": "npm run build:renderer && electron .",
+    "dist": "npm run build:renderer && electron-builder --win --publish never",
+    "release": "npm run build:renderer && electron-builder --win --publish always"
+  },
+  "build": {
+    "appId": "com.cacambadoscria.app",
+    "productName": "Especial Caçamba dos Cria",
+    "artifactName": "Especial-Cacamba-dos-Cria-Setup.${ext}",
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/index.html",
+      "src/styles.css",
+      "src/grupo.jpg",
+      "dist/**/*",
+      "build/icon.png",
+      "package.json"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Especial Caçamba dos Cria",
+      "runAfterFinish": true
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "vm-freire",
+        "repo": "especial-cacamba-dos-cria",
+        "releaseType": "release"
+      }
+    ]
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.11",
+    "firebase": "^13.4.0"
+  },
+  "devDependencies": {
+    "electron": "^45.4.1",
+    "electron-builder": "^26.18.0",
+    "esbuild": "^0.28.2"
+  }
+}

@@ -1,0 +1,72 @@
+rules_version = '2';
+// Regras do Especial Caçamba dos Cria.
+// Qualquer pessoa com o app cria conta; servidores e salas só podem ser mexidos por quem é membro deles.
+service cloud.firestore {
+  match /databases/{db}/documents {
+    function signedIn() { return request.auth != null; }
+    function member() {
+      return signedIn() && exists(/databases/$(db)/documents/members/$(request.auth.uid));
+    }
+    function validName(n, max) { return n is string && n.size() > 0 && n.size() <= max; }
+    function inServer(serverId) {
+      return request.auth.uid in get(/databases/$(db)/documents/servers/$(serverId)).data.members;
+    }
+
+    match /members/{uid} {
+      allow read: if signedIn();
+      allow create, update: if signedIn() && request.auth.uid == uid && validName(request.resource.data.name, 32);
+    }
+
+    match /servers/{id} {
+      allow read: if member();
+      allow create: if member()
+        && request.resource.data.ownerId == request.auth.uid
+        && request.resource.data.members == [request.auth.uid]
+        && validName(request.resource.data.name, 40);
+      // dono muda tudo; qualquer um pode entrar/sair (lista de membros) — entrar exige o código ou um convite no app
+      allow update: if member() && (
+        resource.data.ownerId == request.auth.uid
+          ? request.resource.data.ownerId == resource.data.ownerId && validName(request.resource.data.name, 40)
+          : request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members'])
+      );
+      allow delete: if signedIn() && resource.data.ownerId == request.auth.uid;
+    }
+
+    match /rooms/{id} {
+      allow read: if member();
+      allow create: if member() && inServer(request.resource.data.serverId) && validName(request.resource.data.name, 40);
+      allow update: if member() && inServer(resource.data.serverId)
+        && request.resource.data.serverId == resource.data.serverId
+        && validName(request.resource.data.name, 40);
+      allow delete: if member() && inServer(resource.data.serverId);
+    }
+
+    match /notifications/{id} {
+      allow create: if member() && request.resource.data.from == request.auth.uid && request.resource.data.to is string;
+      allow read, delete: if signedIn() && resource.data.to == request.auth.uid;
+    }
+
+    match /presence/{sid} {
+      allow read: if member();
+      allow create, update: if member() && request.resource.data.uid == request.auth.uid;
+      allow delete: if member();
+    }
+
+    match /signals/{id} {
+      allow create: if member() && request.resource.data.to is string && request.resource.data.from is string;
+      allow read, delete: if member();
+    }
+
+    match /sounds/{id} {
+      allow read: if member();
+      allow create: if member() && request.resource.data.uid == request.auth.uid && validName(request.resource.data.name, 40);
+      allow update, delete: if member();
+    }
+
+    match /soundData/{id} {
+      allow read: if member();
+      allow create: if member() && request.resource.data.data is string && request.resource.data.data.size() < 1000000;
+      allow delete: if member();
+    }
+  }
+}
