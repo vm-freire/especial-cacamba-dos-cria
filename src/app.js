@@ -29,6 +29,8 @@ const modalRoot = $('#modal-root');
 
 // ---------------------------------------------------------------- configurações
 const DEFAULTS = {
+  camDevice: '',
+  camDeviceLabel: '',
   inputDevice: 'default',
   inputDeviceLabel: '',
   outputDevice: 'default',
@@ -100,6 +102,8 @@ const st = {
   deafened: false,
   sharing: false,
   screenStream: null,
+  cam: false,
+  camStream: null,
   remote: new Map(), // sid -> { mic, screenVideo, screenAudio }
   conn: {},
   ping: {},
@@ -460,6 +464,7 @@ function presenceState() {
     muted: st.muted || st.deafened,
     deafened: st.deafened,
     sharing: st.sharing,
+    cam: st.cam,
   };
 }
 
@@ -594,6 +599,7 @@ async function leaveRoom(silent = false) {
   if (!st.roomId) return;
   if (bot.amHost()) await bot.stop().catch(() => {});
   if (st.sharing) await stopShare(true);
+  if (st.cam) await stopCam(true);
   if (mesh) mesh.closeAll();
   mesh = null;
   out.removeAll();
@@ -609,7 +615,7 @@ async function leaveRoom(silent = false) {
     mic.destroy();
     mic = null;
   }
-  if (st.presenceObj) await st.presenceObj.set({ roomId: null, serverId: null, sharing: false });
+  if (st.presenceObj) await st.presenceObj.set({ roomId: null, serverId: null, sharing: false, cam: false });
   if (!silent) {
     blip('leave-self');
     renderMain();
@@ -631,6 +637,8 @@ function onRemoteTrack(sid, role, track) {
     r.screenVideo = track;
   } else if (role === 'bot') {
     out.addTrack(sid + ':bot', track, S.botVolume ?? 70);
+  } else if (role === 'cam') {
+    r.cam = track;
   }
   st.remote.set(sid, r);
   renderStage();
@@ -802,6 +810,88 @@ async function startShare(sourceId) {
   renderStage();
   renderControls();
   renderSidebar();
+}
+
+// ---------------------------------------------------------------- webcam
+async function openCamStream() {
+  const base = { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } };
+  if (S.camDevice) {
+    try {
+      return await navigator.mediaDevices.getUserMedia({ video: { ...base, deviceId: { exact: S.camDevice } }, audio: false });
+    } catch (_) {
+      // o ID mudou (outra porta USB): tenta achar pelo nome, senão usa a padrão
+      try {
+        const devs = await navigator.mediaDevices.enumerateDevices();
+        const byLabel = devs.find((d) => d.kind === 'videoinput' && d.label && d.label === S.camDeviceLabel);
+        if (byLabel) return await navigator.mediaDevices.getUserMedia({ video: { ...base, deviceId: { exact: byLabel.deviceId } }, audio: false });
+      } catch (_) {}
+    }
+  }
+  return navigator.mediaDevices.getUserMedia({ video: base, audio: false });
+}
+
+async function startCam() {
+  if (!st.roomId || !mesh || st.cam) return;
+  let stream;
+  try {
+    stream = await openCamStream();
+  } catch (e) {
+    console.error(e);
+    const msg =
+      e && e.name === 'NotFoundError'
+        ? 'Nenhuma webcam encontrada.'
+        : e && e.name === 'NotReadableError'
+          ? 'A webcam está sendo usada por outro programa.'
+          : 'Não consegui abrir a webcam.';
+    return toast(msg, true);
+  }
+  if (!st.roomId || !mesh) {
+    stream.getTracks().forEach((t) => t.stop());
+    return;
+  }
+  const vt = stream.getVideoTracks()[0];
+  vt.contentHint = 'motion';
+  vt.addEventListener('ended', () => stopCam());
+  st.camStream = stream;
+  st.cam = true;
+  mesh.setCamTrack(vt);
+  if (st.presenceObj) await st.presenceObj.set({ cam: true });
+  renderStage();
+  renderControls();
+  renderSidebar();
+}
+
+async function stopCam(silent = false) {
+  if (!st.cam) return;
+  st.cam = false;
+  if (st.camStream) st.camStream.getTracks().forEach((t) => t.stop());
+  st.camStream = null;
+  if (st.focus === 'p:' + st.sid) st.focus = null;
+  if (mesh) mesh.setCamTrack(null);
+  if (st.presenceObj) await st.presenceObj.set({ cam: false });
+  if (!silent) {
+    renderStage();
+    renderControls();
+    renderSidebar();
+  }
+}
+
+// trocou a câmera nas configurações com ela ligada: troca na hora
+async function switchCam() {
+  if (!st.cam || !mesh) return;
+  try {
+    const stream = await openCamStream();
+    const vt = stream.getVideoTracks()[0];
+    vt.contentHint = 'motion';
+    vt.addEventListener('ended', () => stopCam());
+    if (st.camStream) st.camStream.getTracks().forEach((t) => t.stop());
+    st.camStream = stream;
+    mesh.setCamTrack(vt);
+    renderStage();
+  } catch (e) {
+    console.error(e);
+    toast('Não consegui trocar a webcam.', true);
+  }
 }
 
 async function stopShare(silent = false) {
@@ -1187,7 +1277,7 @@ function renderRail() {
 }
 
 function flags(p) {
-  return `<span class="flags">${p.sharing ? '<span class="live">AO VIVO</span>' : ''}${p.deafened ? icon('headsetOff', 'sm') : p.muted ? icon('micOff', 'sm') : ''}</span>`;
+  return `<span class="flags">${p.sharing ? '<span class="live">AO VIVO</span>' : ''}${p.cam ? icon('cam', 'sm') : ''}${p.deafened ? icon('headsetOff', 'sm') : p.muted ? icon('micOff', 'sm') : ''}</span>`;
 }
 
 const onlineUids = () => new Set(st.presence.map((p) => p.uid));
@@ -1359,6 +1449,7 @@ function renderControls() {
   el.innerHTML = `
     <button class="cbtn ${m ? 'off' : ''}" data-act="mute" title="Ctrl+Shift+M">${icon(m ? 'micOff' : 'mic')}</button>
     <button class="cbtn ${st.deafened ? 'off' : ''}" data-act="deafen" title="Ctrl+Shift+D">${icon(st.deafened ? 'headsetOff' : 'headset')}</button>
+    <button class="cbtn ${st.cam ? 'on' : ''}" data-act="cam" title="${st.cam ? 'Desligar câmera' : 'Ligar câmera'}">${icon(st.cam ? 'cam' : 'camOff')}</button>
     <button class="cbtn ${st.sharing ? 'live' : ''}" data-act="share">${icon(st.sharing ? 'screenOff' : 'screen')} ${st.sharing ? 'Parar transmissão' : 'Compartilhar tela'}</button>
     <button class="cbtn ${st.showSB ? 'on' : ''}" data-act="toggle-sb" title="Soundboard">${icon('sound')}</button>
     <button class="cbtn" data-act="settings" title="Configurações">${icon('gear')}</button>
@@ -1377,7 +1468,7 @@ function makeTile(key, kind) {
     el.innerHTML = `<video autoplay playsinline muted></video><span class="live">AO VIVO</span><div class="tag"></div>
       <div class="tools"></div>`;
   } else {
-    el.innerHTML = `<div class="av"></div><div class="tag"></div><span class="ping"></span>`;
+    el.innerHTML = `<video class="cam" autoplay playsinline muted></video><div class="av"></div><div class="tag"></div><span class="ping"></span>`;
   }
   return el;
 }
@@ -1876,7 +1967,7 @@ function renderStage() {
   }
   const people = roomMembers(st.roomId);
   if (!people.find((p) => p.sid === st.sid)) {
-    people.unshift({ sid: st.sid, uid: st.user.uid, name: st.me.name, color: st.me.color, muted: st.muted || st.deafened, deafened: st.deafened, sharing: st.sharing });
+    people.unshift({ sid: st.sid, uid: st.user.uid, name: st.me.name, color: st.me.color, muted: st.muted || st.deafened, deafened: st.deafened, sharing: st.sharing, cam: st.cam });
   }
   const screens = people.filter((p) => (p.sid === st.sid ? st.sharing : p.sharing));
   const keys = [...screens.map((p) => 's:' + p.sid), ...people.map((p) => 'p:' + p.sid)];
@@ -1903,6 +1994,20 @@ function renderStage() {
     }
     t.querySelector('.tag').innerHTML = `${p.deafened ? icon('headsetOff') : p.muted ? icon('micOff') : ''}<span class="ellipsis">${esc(p.name)}${me ? ' (você)' : ''}</span>`;
     t.querySelector('.ping').textContent = !me && st.ping[p.sid] != null ? `${Math.round(st.ping[p.sid] * 1000)} ms` : '';
+    // webcam: o vídeo toma o lugar da foto
+    const camOn = me ? st.cam : !!p.cam;
+    const camTrack = camOn ? (me ? st.camStream && st.camStream.getVideoTracks()[0] : st.remote.get(p.sid)?.cam) : null;
+    const cv = t.querySelector('video.cam');
+    t.classList.toggle('has-cam', !!camTrack);
+    cv.classList.toggle('mirror', me);
+    if (camTrack && cv._tid !== camTrack.id) {
+      cv.srcObject = new MediaStream([camTrack]);
+      cv._tid = camTrack.id;
+      cv.play().catch(() => {});
+    } else if (!camTrack && cv._tid) {
+      cv.srcObject = null;
+      cv._tid = null;
+    }
   }
   for (const p of screens) {
     const t = tileEls.get('s:' + p.sid);
@@ -2085,6 +2190,7 @@ async function openSettings(tab = settingsTab) {
   settingsTab = tab;
   let inputs = [];
   let outputs = [];
+  let cams = [];
   if (tab === 'voice') {
     if (!mic) {
       // abre o mic só pra testar (sem enviar a ninguém)
@@ -2094,6 +2200,7 @@ async function openSettings(tab = settingsTab) {
       const devs = await navigator.mediaDevices.enumerateDevices();
       inputs = devs.filter((d) => d.kind === 'audioinput');
       outputs = devs.filter((d) => d.kind === 'audiooutput');
+      cams = devs.filter((d) => d.kind === 'videoinput');
     } catch (_) {}
   }
   const version = await bridge.version();
@@ -2111,6 +2218,8 @@ async function openSettings(tab = settingsTab) {
       <div class="two">
         <div><div class="label">Microfone</div><select data-set="inputDevice">${opt(inputs, S.inputDevice)}</select></div>
         <div><div class="label">Alto-falante / fone</div><select data-set="outputDevice">${opt(outputs, S.outputDevice)}</select></div>
+        <div><div class="label">Webcam</div><select data-set="camDevice"><option value="" ${!S.camDevice ? 'selected' : ''}>Padrão do Windows</option>${cams.length ? cams.map((d, i) => `<option value="${esc(d.deviceId)}" ${d.deviceId === S.camDevice ? 'selected' : ''}>${esc(d.label || 'Câmera ' + (i + 1))}</option>`).join('') : ''}</select></div>
+        <div class="hint" style="align-self:end">${cams.length ? 'A câmera liga pelo botão de câmera na chamada.' : 'Nenhuma webcam encontrada neste PC.'}</div>
         <div><div class="label">Volume do microfone — <span data-show="inputVolume">${S.inputVolume}</span>%</div><input type="range" min="0" max="200" value="${S.inputVolume}" data-set-num="inputVolume"/></div>
         <div><div class="label">Volume da saída — <span data-show="outputVolume">${S.outputVolume}</span>%</div><input type="range" min="0" max="200" value="${S.outputVolume}" data-set-num="outputVolume"/></div>
       </div>
@@ -2226,6 +2335,7 @@ async function openSettings(tab = settingsTab) {
       }
       if (t.dataset.set === 'inputDevice' && mic) await mic.update({ ...S });
       if (t.dataset.set === 'outputDevice') await applyOutputDevice();
+      if (t.dataset.set === 'camDevice') await switchCam();
     }
   });
   m.addEventListener('input', (e) => {
@@ -2660,7 +2770,7 @@ function confirmBox(text, onOk, okLabel = 'Excluir') {
 document.addEventListener('click', async (e) => {
   const b = e.target.closest('[data-act]');
   if (!b) {
-    const tile = e.target.closest('.tile.screen');
+    const tile = e.target.closest('.tile.screen, .tile.has-cam');
     if (tile) {
       st.focus = st.focus === tile.dataset.key ? null : tile.dataset.key;
       renderStage();
@@ -2743,6 +2853,10 @@ document.addEventListener('click', async (e) => {
       break;
     case 'deafen':
       toggleDeafen();
+      break;
+    case 'cam':
+      if (st.cam) stopCam();
+      else startCam();
       break;
     case 'share':
       if (st.sharing) stopShare();

@@ -1,8 +1,8 @@
 // WebRTC em malha (cada um conecta direto com cada um — sem servidor de mídia no meio)
-// Transceivers fixos: [0] voz, [1] vídeo da tela, [2] áudio da tela, [3] música do bot.
+// Transceivers fixos: [0] voz, [1] vídeo da tela, [2] áudio da tela, [3] música do bot, [4] webcam.
 // Começar/parar a transmissão é só replaceTrack -> instantâneo, sem renegociar.
 
-const ROLES = ['mic', 'screen-video', 'screen-audio', 'bot'];
+const ROLES = ['mic', 'screen-video', 'screen-audio', 'bot', 'cam'];
 
 export const SCREEN_PRESETS = {
   '720p30': { label: '720p • 30 FPS', w: 1280, h: 720, fps: 30, bitrate: 2_500_000 },
@@ -77,7 +77,10 @@ class Peer {
       const st = pc.connectionState;
       mesh.onState(sid, st);
       clearTimeout(this.disconnectTimer);
-      if (st === 'connected') this.applyScreenParams();
+      if (st === 'connected') {
+        this.applyScreenParams();
+        this.applyCamParams();
+      }
       if (st === 'failed') this.restart();
       if (st === 'disconnected') this.disconnectTimer = setTimeout(() => this.restart(), 4000);
     };
@@ -97,6 +100,7 @@ class Peer {
         pc.addTransceiver('video', { direction: 'sendrecv' }),
         pc.addTransceiver('audio', { direction: 'sendrecv' }),
         pc.addTransceiver('audio', { direction: 'sendrecv' }),
+        pc.addTransceiver('video', { direction: 'sendrecv' }),
       ];
       this.attachLocal();
     }
@@ -126,6 +130,10 @@ class Peer {
     this.tx[1].sender.replaceTrack(m.screenVideo || null);
     this.tx[2].sender.replaceTrack(m.screenAudio || null);
     if (this.tx[3]) this.tx[3].sender.replaceTrack(m.botTrack || null);
+    if (this.tx[4]) {
+      preferCodec(this.tx[4], m.codec);
+      this.tx[4].sender.replaceTrack(m.camTrack || null);
+    }
   }
 
   async handle(data) {
@@ -136,7 +144,7 @@ class Peer {
         if (this.initiator) return; // nunca deveria acontecer
         await pc.setRemoteDescription(desc);
         if (!this.tx) {
-          this.tx = pc.getTransceivers().slice(0, 4); // versões antigas mandam só 3 (sem bot)
+          this.tx = pc.getTransceivers().slice(0, 5); // versões antigas mandam menos (sem bot/webcam)
           this.tx.forEach((t) => (t.direction = 'sendrecv'));
           this.attachLocal();
         }
@@ -151,6 +159,7 @@ class Peer {
       for (const c of this.pendingIce.splice(0)) await pc.addIceCandidate(c).catch(() => {});
       this.applyScreenParams();
       this.applyMicParams();
+      this.applyCamParams();
     } else if (data.type === 'ice') {
       if (!pc.remoteDescription) this.pendingIce.push(data.candidate);
       else await pc.addIceCandidate(data.candidate).catch(() => {});
@@ -177,6 +186,19 @@ class Peer {
       p.encodings[0].maxBitrate = 96000;
       p.encodings[0].priority = 'high';
       p.encodings[0].networkPriority = 'high';
+      await s.setParameters(p);
+    } catch (_) {}
+  }
+
+  async applyCamParams() {
+    if (!this.tx || !this.tx[4] || !this.mesh.camTrack) return;
+    try {
+      const s = this.tx[4].sender;
+      const p = s.getParameters();
+      if (!p.encodings || !p.encodings.length) return;
+      p.encodings[0].maxBitrate = 1_200_000;
+      p.encodings[0].maxFramerate = 30;
+      p.degradationPreference = 'balanced';
       await s.setParameters(p);
     } catch (_) {}
   }
@@ -276,6 +298,17 @@ export class Mesh {
   setBotTrack(track) {
     this.botTrack = track;
     for (const p of this.peers.values()) if (p.tx && p.tx[3]) p.tx[3].sender.replaceTrack(track).catch(() => {});
+  }
+
+  setCamTrack(track) {
+    this.camTrack = track;
+    for (const p of this.peers.values()) {
+      if (!p.tx || !p.tx[4]) continue;
+      p.tx[4].sender
+        .replaceTrack(track)
+        .then(() => p.applyCamParams())
+        .catch(() => {});
+    }
   }
 
   setMicTrack(track) {

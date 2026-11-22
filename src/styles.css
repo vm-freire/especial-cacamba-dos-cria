@@ -526,3 +526,12 @@ body.fs #fs-btn { display: none; }
 .snd-cover img, .snd-cover .mp3 { width: 88px; height: 88px; border-radius: 12px; }
 .trim canvas { width: 100%; height: 80px; background: var(--bg1); border-radius: 8px; display: block; margin-bottom: 8px; }
 .modal-head h3 { display: flex; align-items: center; gap: 8px; }
+
+/* webcam no quadro da pessoa */
+.tile video.cam { display: none; object-fit: cover; background: #000; }
+.tile.has-cam video.cam { display: block; }
+.tile.has-cam .av { display: none; }
+.tile.has-cam { cursor: pointer; }
+.tile video.cam.mirror { transform: scaleX(-1); }
+.grid.focus .focus-main .tile.has-cam video.cam { object-fit: contain; }
+.flags .icon { vertical-align: middle; }
