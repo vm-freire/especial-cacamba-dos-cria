@@ -120,7 +120,7 @@ const st = {
   speaking: new Set(),
   lastSpeak: new Map(),
   focus: null,
-  showSB: true,
+  showSB: false, // soundboard começa fechada; abre no botão
   update: null,
   unsubs: [],
   prevRoomSids: new Set(),
