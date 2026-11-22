@@ -190,6 +190,11 @@ async function botLogado() {
 // (não mexe no navegador normal da pessoa). Depois do login, lê só os cookies do Google/YouTube
 // pela porta de depuração local, copia pro bot e fecha essa janela. A senha nunca passa pelo app.
 const LOGIN_URL = 'https://accounts.google.com/ServiceLogin?service=youtube&passive=true&continue=' + encodeURIComponent('https://www.youtube.com/signin?action_handle_signin=true&next=%2F');
+// depois do login o Google manda pra um vídeo conhecido: o título da janela ("Me at the zoo - YouTube")
+// avisa que terminou (a própria tela de login também se chama "YouTube", então não serve)
+const VIDEO_FIM = 'jNQXAC9IVRw';
+const LOGIN_URL_EXT = 'https://accounts.google.com/ServiceLogin?service=youtube&passive=true&continue=' + encodeURIComponent(`https://www.youtube.com/signin?action_handle_signin=true&next=${encodeURIComponent('/watch?v=' + VIDEO_FIM)}`);
+const TITULO_FIM = /Me at the zoo/i;
 function acharNavegador() {
   const env = process.env;
   const lista = [
@@ -235,39 +240,72 @@ function loginExterno(exe) {
   const dir = path.join(app.getPath('userData'), 'yt-login');
   fs.rmSync(dir, { recursive: true, force: true });
   fs.mkdirSync(dir, { recursive: true });
-  const { spawn } = require('child_process');
-  const proc = spawn(exe, [`--user-data-dir=${dir}`, '--remote-debugging-port=0', '--remote-allow-origins=*', '--no-first-run', '--no-default-browser-check', '--disable-sync', '--new-window', LOGIN_URL], { windowsHide: false, detached: false, stdio: 'ignore' });
+  const { spawn, execFile } = require('child_process');
+  const base = [`--user-data-dir=${dir}`, '--no-first-run', '--no-default-browser-check', '--disable-sync'];
+  // 1) Chrome normal, SEM depuração (o Google recusa login com ela ligada)
+  const proc = spawn(exe, [...base, '--autoplay-policy=user-gesture-required', '--new-window', LOGIN_URL_EXT], { windowsHide: false, stdio: 'ignore' });
   loginProc = proc;
+  const titulo = () =>
+    new Promise((res) =>
+      execFile('tasklist', ['/v', '/fo', 'csv', '/nh', '/fi', `PID eq ${proc.pid}`], { windowsHide: true, timeout: 8000 }, (e, out) => res(e ? '' : (String(out).match(/"([^"]*)"\s*$/m) || [])[1] || ''))
+    );
+  const esperarSair = (p, ms) => new Promise((res) => { if (p.exitCode !== null) return res(); const t = setTimeout(res, ms); p.once('exit', () => { clearTimeout(t); res(); }); });
   return new Promise((resolve) => {
     let fim = false;
-    let saiu = false;
-    proc.on('exit', () => (saiu = true));
     const acabar = async (ok) => {
       if (fim) return;
       fim = true;
       clearInterval(timer);
       loginProc = null;
-      try { process.kill(proc.pid); } catch (_) {}
-      setTimeout(() => fs.rmSync(dir, { recursive: true, force: true }), 3000); // apaga o perfil temporário
+      setTimeout(() => fs.rmSync(dir, { recursive: true, force: true }), 4000); // apaga o perfil temporário
       botRecarregar = true;
       if (win && !win.isDestroyed()) win.focus();
       resolve(ok || (await botLogado()));
     };
+    // 2) depois do login: reabre o MESMO perfil escondido, com depuração, só pra ler os cookies
+    const lerSessao = async () => {
+      const df = path.join(dir, 'DevToolsActivePort');
+      fs.rmSync(df, { force: true });
+      const h = spawn(exe, [...base, '--headless=new', '--remote-debugging-port=0', '--remote-allow-origins=*', 'about:blank'], { windowsHide: true, stdio: 'ignore' });
+      try {
+        for (let i = 0; i < 20; i++) {
+          await new Promise((r) => setTimeout(r, 750));
+          try {
+            const porta = fs.readFileSync(df, 'utf8').split(/\r?\n/)[0].trim();
+            const ver = await (await fetch(`http://127.0.0.1:${porta}/json/version`)).json();
+            const { cookies } = await cdp(ver.webSocketDebuggerUrl, 'Storage.getCookies');
+            const logado = cookies.some((c) => /youtube\.com$/.test(c.domain) && (c.name === 'LOGIN_INFO' || c.name === 'SAPISID' || c.name === '__Secure-3PAPISID'));
+            if (logado) await importarCookies(cookies);
+            await cdp(ver.webSocketDebuggerUrl, 'Browser.close').catch(() => {});
+            return logado;
+          } catch (_) {}
+        }
+        return false;
+      } finally {
+        await esperarSair(h, 3000);
+        try { process.kill(h.pid); } catch (_) {}
+      }
+    };
+    let lendo = false;
     const inicio = Date.now();
     const timer = setInterval(async () => {
-      if (Date.now() - inicio > 10 * 60_000) return acabar(false);
-      try {
-        const porta = fs.readFileSync(path.join(dir, 'DevToolsActivePort'), 'utf8').split(/\r?\n/)[0].trim();
-        const ver = await (await fetch(`http://127.0.0.1:${porta}/json/version`)).json();
-        const { cookies } = await cdp(ver.webSocketDebuggerUrl, 'Storage.getCookies');
-        if (cookies.some((c) => /youtube\.com$/.test(c.domain) && (c.name === 'LOGIN_INFO' || c.name === 'SAPISID' || c.name === '__Secure-3PAPISID'))) {
-          await importarCookies(cookies);
-          await cdp(ver.webSocketDebuggerUrl, 'Browser.close').catch(() => {});
-          return acabar(true);
-        }
-      } catch (_) {
-        if (saiu) return acabar(false); // fechou a janela sem logar
+      if (lendo) return;
+      if (Date.now() - inicio > 10 * 60_000) {
+        try { process.kill(proc.pid); } catch (_) {}
+        return acabar(false);
       }
+      const saiu = proc.exitCode !== null;
+      // chegou no vídeo = login feito: fecha a janela com calma (pra gravar os cookies)
+      const t = saiu ? '' : await titulo();
+      if (!saiu && !TITULO_FIM.test(t)) return;
+      lendo = true;
+      if (!saiu) {
+        await new Promise((r) => setTimeout(r, 2500));
+        execFile('taskkill', ['/PID', String(proc.pid)], { windowsHide: true }, () => {});
+        await esperarSair(proc, 8000);
+        try { process.kill(proc.pid); } catch (_) {}
+      }
+      acabar(await lerSessao().catch(() => false));
     }, 2000);
   });
 }
