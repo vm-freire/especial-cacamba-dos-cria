@@ -24,5 +24,17 @@ contextBridge.exposeInMainWorld('cacamba', {
     related: (id) => ipcRenderer.invoke('bot:related', id),
     onState: (cb) => ipcRenderer.on('bot-state', (_e, s) => cb(s)),
   },
+  vozes: {
+    estado: () => ipcRenderer.invoke('vozes:estado'),
+    catalogo: (forcar) => ipcRenderer.invoke('vozes:catalogo', forcar),
+    instalarMotor: () => ipcRenderer.invoke('vozes:instalarMotor'),
+    baixar: (id) => ipcRenderer.invoke('vozes:baixar', id),
+    apagar: (id) => ipcRenderer.invoke('vozes:apagar', id),
+    iniciar: (id, opts) => ipcRenderer.invoke('vozes:iniciar', id, opts),
+    processar: (buf) => ipcRenderer.invoke('vozes:processar', buf),
+    info: () => ipcRenderer.invoke('vozes:info'),
+    parar: () => ipcRenderer.invoke('vozes:parar'),
+    onProgresso: (cb) => ipcRenderer.on('vozes-prog', (_e, d) => cb(d)),
+  },
   platform: process.platform,
 });

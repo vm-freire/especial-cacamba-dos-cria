@@ -44,7 +44,8 @@ const DEFAULTS = {
   autoGainControl: false,
   gateEnabled: false,
   aiNoise: true,
-  voiceFilter: '', // '' = voz normal, 'autotune'
+  voiceFilter: '', // '' = voz normal, 'autotune', 'ai:<id>' (voz com IA)
+  vozF0: 0, // tom médio da sua voz (aprendido sozinho pelas vozes com IA)
   settingsVersion: 4,
   gateThreshold: -50,
   quality: '1080p60',
@@ -553,8 +554,15 @@ async function ensureMic() {
       S.inputDevice = id;
       saveSettings();
     };
+    mic.onVoiceInfo = (i) => {
+      if (!S.vozF0 || Math.abs(12 * Math.log2(i.userF0 / S.vozF0)) > 0.5) {
+        S.vozF0 = Math.round(i.userF0);
+        saveSettings();
+      }
+    };
     await mic.start();
     mic.setMuted(st.muted || st.deafened);
+    checkVoiceError();
     return mic;
   } catch (e) {
     console.error(e);
@@ -1509,7 +1517,7 @@ function renderUserPanel() {
     const sv = st.servers.find((x) => x.id === st.roomServerId);
     cb.innerHTML = st.roomId
       ? `<div class="callbar"><div class="grow"><b>Voz conectada</b><small class="ellipsis">${esc(st.roomName)} / ${esc(sv ? sv.name : '')}</small></div>
-         <button class="ibtn ${S.voiceFilter ? 'fx-on' : ''}" data-act="voice-fx" title="${S.voiceFilter ? 'Filtro de voz: Autotune' : 'Filtros de voz'}">${icon('fx')}</button>
+         <button class="ibtn ${S.voiceFilter ? 'fx-on' : ''}" data-act="voice-fx" title="${S.voiceFilter ? 'Filtro de voz: ' + esc(voiceName(S.voiceFilter)) : 'Filtros de voz'}">${icon('fx')}</button>
          <button class="ibtn" data-act="go-call" title="Ir para a chamada">${icon('voice')}</button>
          <button class="ibtn off" data-act="leave" title="Desconectar">${icon('hangup')}</button></div>`
       : '';
@@ -2841,14 +2849,131 @@ const VOICE_FX = [
   { id: '', name: 'Voz normal', desc: 'Sem filtro' },
   { id: 'autotune', name: 'Autotune', desc: 'Estilo trap do Autotune Igão' },
 ];
+// vozes com IA: catálogo publicado pelo Estúdio de Vozes (release "vozes" do GitHub)
+const vz = { estado: null, catalogo: null, carregando: false, prog: {}, erro: '', ligando: '' };
+const vozesApi = () => window.cacamba && window.cacamba.vozes;
+const fmtMB = (b) => (b >= 1e9 ? (b / 1e9).toFixed(1).replace('.', ',') + ' GB' : Math.max(1, Math.round(b / 1e6)) + ' MB');
+const errMsg = (e) => String((e && e.message) || e).replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
+function voiceName(id) {
+  const f = VOICE_FX.find((x) => x.id === id);
+  if (f) return f.name;
+  const v = id && id.startsWith('ai:') && vz.catalogo && vz.catalogo.vozes.find((x) => x.id === id.slice(3));
+  return v ? v.nome : id && id.startsWith('ai:') ? 'Voz com IA' : 'Voz normal';
+}
+async function loadVozes(forcar = false) {
+  const api = vozesApi();
+  if (!api || vz.carregando) return;
+  vz.carregando = true;
+  vz.erro = '';
+  if (st.showVoices) renderStage();
+  try {
+    const [e, c] = await Promise.all([api.estado(), api.catalogo(forcar)]);
+    vz.estado = e;
+    vz.catalogo = c;
+    if (forcar) toast(c.vozes.length ? `Vozes atualizadas: ${c.vozes.length} disponíve${c.vozes.length === 1 ? 'l' : 'is'}` : 'Ainda não tem nenhuma voz publicada');
+  } catch (e) {
+    vz.erro = 'Não consegui buscar as vozes. Confere a internet.';
+  }
+  vz.carregando = false;
+  if (st.showVoices) renderStage();
+}
+let vozProgT = 0;
+if (vozesApi()) {
+  vozesApi().onProgresso((d) => {
+    vz.prog[d.tipo === 'motor' ? 'motor' : d.id] = d.p;
+    const now = performance.now();
+    if (now - vozProgT > 250 && st.showVoices) {
+      vozProgT = now;
+      renderStage();
+    }
+  });
+}
+function checkVoiceError() {
+  if (mic && mic.filterError) {
+    toast(`A voz com IA não ligou: ${mic.filterError}`, true);
+    mic.filterError = '';
+    S.voiceFilter = '';
+    saveSettings();
+    mic.update({ ...S });
+    renderUserPanel();
+    renderControls();
+    if (st.showVoices) renderStage();
+  }
+}
 async function setVoiceFilter(id) {
+  if (id.startsWith('ai:')) {
+    vz.ligando = id;
+    if (st.showVoices) renderStage();
+    toast('Carregando a voz…');
+  }
   S.voiceFilter = id;
   saveSettings();
   if (!mic) await ensureMic();
   if (mic) await mic.update({ ...S });
+  vz.ligando = '';
   renderUserPanel();
   renderControls();
-  toast(id ? `Filtro ligado: ${VOICE_FX.find((f) => f.id === id).name}` : 'Voz normal de volta');
+  if (mic && mic.filterError) return checkVoiceError();
+  if (id.startsWith('ai:') && mic && mic.filter && mic.filter.gpu === false) toast('Sem placa de vídeo compatível: a voz roda no processador e pode engasgar.', true);
+  toast(id ? `Voz ligada: ${voiceName(id)}` : 'Voz normal de volta');
+}
+// primeira vez: instala o motor (uma vez só), depois baixa a voz e já liga
+async function getAiVoice(id) {
+  const api = vozesApi();
+  if (!api || !vz.estado) return;
+  const v = vz.catalogo && vz.catalogo.vozes.find((x) => x.id === id);
+  if (!v || vz.prog[id] != null || vz.prog.motor != null) return;
+  if (!vz.estado.motor) {
+    const m = openModal(`<div class="modal-head"><h3>${icon('fx')} Vozes com IA</h3><button class="ibtn" data-act="close">${icon('close')}</button></div>
+      <p>Na primeira vez o Caçamba baixa o <b>motor de vozes</b> (${fmtMB(vz.estado.tamanhoMotor)}, uma vez só). Depois disso cada voz é só um clique.</p>
+      <p class="muted">Ele roda aqui no seu PC usando a placa de vídeo. Não precisa configurar nada.</p>
+      <div class="modal-foot"><button class="btn ghost" id="vz-no">Agora não</button><button class="btn primary" id="vz-ok">${icon('download', 'sm')} Baixar e usar "${esc(v.nome)}"</button></div>`);
+    const ok = await new Promise((r) => {
+      $('#vz-ok', m).onclick = () => r(true);
+      $('#vz-no', m).onclick = () => r(false);
+      const obs = new MutationObserver(() => {
+        if (!modalRoot.contains(m)) {
+          obs.disconnect();
+          r(false);
+        }
+      });
+      obs.observe(modalRoot, { childList: true });
+    });
+    closeModal();
+    if (!ok) return;
+    vz.prog.motor = 0;
+    renderStage();
+    try {
+      await api.instalarMotor();
+      vz.estado.motor = true;
+    } catch (e) {
+      delete vz.prog.motor;
+      renderStage();
+      return toast('Não deu pra baixar o motor: ' + errMsg(e), true);
+    }
+    delete vz.prog.motor;
+  }
+  vz.prog[id] = 0;
+  renderStage();
+  try {
+    const info = await api.baixar(id);
+    vz.estado.baixadas[id] = info;
+  } catch (e) {
+    delete vz.prog[id];
+    renderStage();
+    return toast('Não deu pra baixar a voz: ' + errMsg(e), true);
+  }
+  delete vz.prog[id];
+  await setVoiceFilter('ai:' + id);
+  if (st.showVoices) renderStage();
+}
+async function removeAiVoice(id) {
+  const v = vz.catalogo && vz.catalogo.vozes.find((x) => x.id === id);
+  if (!confirm(`Apagar "${v ? v.nome : id}" do seu PC? Dá pra baixar de novo depois.`)) return;
+  if (S.voiceFilter === 'ai:' + id) await setVoiceFilter('');
+  await vozesApi().apagar(id);
+  delete vz.estado.baixadas[id];
+  renderStage();
 }
 // tela de vozes (área principal): cartões com foto; sem foto = cartão genérico com o nome
 function voiceCard(f) {
@@ -2856,22 +2981,53 @@ function voiceCard(f) {
   const pic = f.img
     ? `<img src="${esc(f.img)}" alt=""/>`
     : `<div class="vc-generic" style="--h:${[...f.name].reduce((a, ch) => a + ch.charCodeAt(0), 0) % 360}">${f.id ? icon('fx') : icon('mic')}<b>${esc(f.name)}</b></div>`;
-  return `<button class="vcard ${on ? 'on' : ''}" data-act="pick-voice" data-id="${esc(f.id)}" title="${esc(f.name)}">
-    <div class="vc-pic">${pic}${on ? `<span class="vc-check">${icon('check', 'sm')}</span>` : ''}</div>
+  const badge = on ? `<span class="vc-check">${icon('check', 'sm')}</span>` : '';
+  let over = '';
+  if (f.prog != null) over = `<div class="vc-over"><b>${Math.floor(f.prog * 100)}%</b><small>${f.progLabel}</small><div class="vc-bar"><i style="width:${(f.prog * 100).toFixed(1)}%"></i></div></div>`;
+  else if (f.loading) over = `<div class="vc-over"><small>Carregando…</small></div>`;
+  else if (f.download) over = `<div class="vc-over dl">${icon('download')}<small>Baixar · ${f.download}</small></div>`;
+  const del = f.removable ? `<span class="vc-del" data-act="voz-apagar" data-id="${esc(f.vid)}" title="Apagar do PC">${icon('close', 'sm')}</span>` : '';
+  return `<button class="vcard ${on ? 'on' : ''}" data-act="${f.act || 'pick-voice'}" data-id="${esc(f.act ? f.vid : f.id)}" title="${esc(f.name)}">
+    <div class="vc-pic">${pic}${badge}${over}${del}</div>
     <span class="vc-name ellipsis">${esc(f.name)}</span>${f.desc ? `<small class="ellipsis">${esc(f.desc)}</small>` : ''}</button>`;
 }
+function aiCards() {
+  if (!vz.catalogo || !vz.estado) return [];
+  return vz.catalogo.vozes.map((v) => {
+    const baixada = !!vz.estado.baixadas[v.id];
+    const id = 'ai:' + v.id;
+    const c = { id, vid: v.id, name: v.nome, desc: v.desc || '', img: v.fotoUrl || '' };
+    if (vz.prog[v.id] != null) Object.assign(c, { prog: vz.prog[v.id], progLabel: 'Baixando a voz', act: 'noop' });
+    else if (vz.prog.motor != null && !baixada) Object.assign(c, { prog: vz.prog.motor, progLabel: 'Baixando o motor', act: 'noop' });
+    else if (vz.ligando === id) Object.assign(c, { loading: true, act: 'noop' });
+    else if (!baixada) Object.assign(c, { act: 'voz-baixar', download: fmtMB(v.modelo.tamanho + (vz.estado.motor ? 0 : vz.estado.tamanhoMotor)) });
+    else c.removable = true;
+    return c;
+  });
+}
 function renderVoices(el) {
-  const cur = VOICE_FX.find((f) => f.id === S.voiceFilter) || VOICE_FX[0];
+  if (!vz.catalogo && !vz.carregando && !vz.erro) loadVozes();
   const q = (st.voiceQuery || '').toLowerCase();
-  const list = VOICE_FX.filter((f) => !q || f.name.toLowerCase().includes(q));
+  const match = (f) => !q || f.name.toLowerCase().includes(q);
+  const fx = VOICE_FX.filter(match);
+  const ai = aiCards().filter(match);
+  let aiBody;
+  if (!vozesApi()) aiBody = '';
+  else if (vz.erro) aiBody = `<div class="hint">${esc(vz.erro)}</div>`;
+  else if (!vz.catalogo) aiBody = `<div class="hint">Buscando vozes…</div>`;
+  else if (!vz.catalogo.vozes.length) aiBody = `<div class="hint">Nenhuma voz com IA publicada ainda. Quando sair uma nova, clica em <b>Atualizar vozes</b>.</div>`;
+  else aiBody = `<div class="vgrid">${ai.map(voiceCard).join('') || '<div class="hint">Nenhuma voz com esse nome.</div>'}</div>`;
   el.innerHTML = `<div class="voices">
     <div class="voices-head">
-      <div class="grow"><h2>${icon('fx')} Filtros de voz</h2><small class="muted">Agora: <b>${esc(cur.name)}</b>${st.roomId ? ' · todo mundo da call ouve' : ' · entra numa call pra usar'}</small></div>
+      <div class="grow"><h2>${icon('fx')} Filtros de voz</h2><small class="muted">Agora: <b>${esc(voiceName(S.voiceFilter))}</b>${st.roomId ? ' · todo mundo da call ouve' : ' · entra numa call pra usar'}</small></div>
       <input type="search" id="voice-q" placeholder="Procurar voz" value="${esc(st.voiceQuery || '')}"/>
       <button class="btn ${mic && mic.monitoring ? 'primary' : 'ghost'}" data-act="voices-monitor" title="Ouvir minha própria voz no fone">${icon('headset', 'sm')} ${mic && mic.monitoring ? 'Me ouvindo' : 'Me ouvir'}</button>
       <button class="ibtn" data-act="voices-close" title="Fechar">${icon('close')}</button>
     </div>
-    <div class="vgrid">${list.map(voiceCard).join('') || '<div class="hint">Nenhuma voz com esse nome.</div>'}</div>
+    <h4 class="vsec">Na hora</h4>
+    <div class="vgrid">${fx.map(voiceCard).join('') || '<div class="hint">Nenhum filtro com esse nome.</div>'}</div>
+    ${vozesApi() ? `<div class="vsec-row"><h4 class="vsec">Vozes com IA</h4><button class="btn ghost sm" data-act="vozes-atualizar" ${vz.carregando ? 'disabled' : ''}>${icon('download', 'sm')} ${vz.carregando ? 'Buscando…' : 'Atualizar vozes'}</button></div>` : ''}
+    ${aiBody}
     <div class="hint" style="margin-top:12px">Use fone pra se ouvir sem microfonia. A voz escolhida fica salva até você trocar.</div>
   </div>`;
   const qi = $('#voice-q', el);
@@ -3403,7 +3559,16 @@ document.addEventListener('click', async (e) => {
       renderControls();
       break;
     case 'pick-voice':
-      setVoiceFilter(b.dataset.id).then(() => st.showVoices && renderStage());
+      if (b.dataset.id !== S.voiceFilter || !b.dataset.id) setVoiceFilter(b.dataset.id).then(() => st.showVoices && renderStage());
+      break;
+    case 'voz-baixar':
+      getAiVoice(b.dataset.id);
+      break;
+    case 'voz-apagar':
+      removeAiVoice(b.dataset.id);
+      break;
+    case 'vozes-atualizar':
+      loadVozes(true);
       break;
     case 'voices-monitor':
       if (!mic) await ensureMic();

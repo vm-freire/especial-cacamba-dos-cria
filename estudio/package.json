@@ -1,0 +1,9 @@
+{
+  "name": "estudio-de-vozes",
+  "productName": "Estúdio de Vozes",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Publica as vozes com IA do Especial Caçamba dos Cria (só pro dono do repositório).",
+  "main": "main.mjs",
+  "type": "module"
+}

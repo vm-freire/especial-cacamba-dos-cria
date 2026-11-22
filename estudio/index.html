@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+  <title>Estúdio de Vozes</title>
+  <link rel="stylesheet" href="estudio.css" />
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Estúdio de Vozes</h1>
+      <small id="status">Carregando…</small>
+    </div>
+    <div class="row">
+      <button id="btn-senha" class="ghost">Senha</button>
+      <button id="nova" class="primary">+ Nova voz</button>
+    </div>
+  </header>
+  <main>
+    <section id="lista-wrap">
+      <div id="senha-box" class="senha" hidden>
+        <b>Senha de publicação</b>
+        <small class="muted">A mesma que está na Vercel (ESTUDIO_SENHA). Fica guardada só neste PC.</small>
+        <div class="row"><input id="senha-in" type="password" placeholder="Senha" /><button id="senha-ok" class="primary">Salvar</button></div>
+      </div>
+      <div id="motor-box" class="senha" hidden>
+        <b>Motor de vozes</b>
+        <small class="muted">Pra testar as vozes aqui, baixa o mesmo motor do Caçamba (uma vez só).</small>
+        <button id="motor-ok" class="primary">Baixar motor</button>
+        <div class="prog" hidden><i></i></div>
+      </div>
+      <h2>Publicadas no Caçamba</h2>
+      <div id="lista" class="lista"><div class="hint">Carregando…</div></div>
+    </section>
+    <section id="editor" hidden>
+      <h2 id="ed-titulo">Nova voz</h2>
+      <div class="grid2">
+        <div>
+          <label>Nome <input id="f-nome" maxlength="40" placeholder="Ex.: Faustão" /></label>
+          <label>Descrição (opcional) <input id="f-desc" maxlength="80" placeholder="Aparece embaixo do nome" /></label>
+          <div class="campo">
+            <span>Modelo da voz (.onnx ou .pth do RVC)</span>
+            <div class="row"><button id="f-modelo">Escolher arquivo</button><small id="f-modelo-info" class="muted">nenhum</small></div>
+          </div>
+          <div class="campo">
+            <span>Tom da voz</span>
+            <div class="row wrap">
+              <button data-f0="0" class="tomb">Manual</button>
+              <button data-f0="115" class="tomb">Grave (homem)</button>
+              <button data-f0="160" class="tomb">Médio</button>
+              <button data-f0="230" class="tomb">Agudo (mulher)</button>
+              <button id="f-ref">Medir de um áudio da voz…</button>
+            </div>
+            <small class="muted" id="f0-info"></small>
+            <label id="tom-wrap">Semitons (manual) <input id="f-tom" type="number" min="-24" max="24" value="0" /></label>
+            <small class="muted">Com um tom definido, o Caçamba ajusta sozinho pro tom de quem estiver falando.</small>
+          </div>
+        </div>
+        <div>
+          <div class="campo">
+            <span>Foto (opcional)</span>
+            <div class="foto" id="f-foto-prev"><span>sem foto<br /><small>fica um cartão com o nome</small></span></div>
+            <div class="row"><button id="f-foto">Escolher foto</button><button id="f-foto-tirar" class="ghost">Tirar foto</button></div>
+          </div>
+        </div>
+      </div>
+      <div class="teste">
+        <h3>Testar</h3>
+        <p class="muted">Sai igual ao que os amigos vão ouvir na call (mesmo motor, mesmos pedaços de 170 ms).</p>
+        <div class="row wrap">
+          <button id="t-gravar">● Gravar 6 s do microfone</button>
+          <button id="t-arquivo" class="ghost">Usar um áudio…</button>
+          <span id="t-info" class="muted"></span>
+        </div>
+        <div class="row wrap players">
+          <div><small>Original</small><audio id="t-orig" controls></audio></div>
+          <div><small>Com a voz</small><audio id="t-conv" controls></audio></div>
+        </div>
+      </div>
+      <div class="acoes">
+        <button id="cancelar" class="ghost">Cancelar</button>
+        <button id="publicar" class="primary">Publicar no Caçamba</button>
+      </div>
+    </section>
+  </main>
+  <div id="toast"></div>
+  <script src="estudio.js"></script>
+</body>
+</html>

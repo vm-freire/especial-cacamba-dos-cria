@@ -11,3 +11,8 @@ for (const f of ['rnnoise.wasm', 'rnnoise_simd.wasm']) fs.copyFileSync(path.join
 const at = path.join(__dirname, '..', 'dist', 'autotune');
 fs.mkdirSync(at, { recursive: true });
 fs.copyFileSync(path.join(__dirname, '..', 'src', 'vendor', 'autotune-igao', 'autotune-processor.js'), path.join(at, 'autotune-processor.js'));
+
+// ponte do áudio das vozes com IA (worklet que junta pedaços e toca a voz convertida)
+const vi = path.join(__dirname, '..', 'dist', 'vozia');
+fs.mkdirSync(vi, { recursive: true });
+fs.copyFileSync(path.join(__dirname, '..', 'src', 'vendor', 'voz-ia-processor.js'), path.join(vi, 'voz-ia-processor.js'));

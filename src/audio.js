@@ -138,7 +138,21 @@ export class MicPipeline {
         console.warn('rnnoise', e);
       }
     }
-    if (this.settings.voiceFilter === 'autotune') {
+    this.filterError = '';
+    const vf = this.settings.voiceFilter || '';
+    if (vf.startsWith('ai:')) {
+      try {
+        this.filter = await this.makeAiVoice(vf.slice(3));
+        if (!this.src) return;
+        node.connect(this.filter.input);
+        node = this.filter.output;
+      } catch (e) {
+        console.warn('voz ia', e);
+        this.filterError = String((e && e.message) || e).replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
+        if (this.filter) for (const n of this.filter.nodes) try { n.disconnect(); } catch (_) {}
+        this.filter = null;
+      }
+    } else if (vf === 'autotune') {
       try {
         this.filter = await this.makeAutotune();
         if (!this.src) return;
@@ -159,8 +173,53 @@ export class MicPipeline {
     }
     if (this.filter) {
       for (const n of this.filter.nodes) try { n.disconnect(); } catch (_) {}
+      if (this.filter.ai) this.stopAi(this.filter);
       this.filter = null;
     }
+  }
+
+  // Voz com IA: o worklet junta o mic em pedaços de 170 ms, o processo principal converte (placa de vídeo)
+  // e a voz nova volta pro mesmo caminho (gate, volume, chamada e retorno)
+  async makeAiVoice(id) {
+    const api = window.cacamba && window.cacamba.vozes;
+    if (!api) throw new Error('vozes indisponíveis');
+    const r = await api.iniciar(id, { userF0: this.settings.vozF0 || 0 });
+    const ctx = this.ctx;
+    if (!this.vozIaReady) {
+      await ctx.audioWorklet.addModule(new URL('./vozia/voz-ia-processor.js', import.meta.url).href);
+      this.vozIaReady = true;
+    }
+    const node = new AudioWorkletNode(ctx, 'voz-ia', {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [1],
+      channelCount: 1,
+      channelCountMode: 'explicit',
+      processorOptions: { hop: r.hop },
+    });
+    const f = { input: node, output: node, nodes: [node], ai: true, id, gpu: r.gpu, alive: true };
+    node.port.onmessage = async (e) => {
+      if (!f.alive) return;
+      let out = null;
+      try {
+        out = await api.processar(e.data);
+      } catch (_) {}
+      if (f.alive && out) node.port.postMessage(out, [out.buffer]);
+    };
+    // de tempos em tempos guarda o tom de quem fala (da próxima vez já começa certo)
+    f.timer = setInterval(async () => {
+      const i = await api.info().catch(() => null);
+      if (i && i.userF0 && this.onVoiceInfo) this.onVoiceInfo(i);
+    }, 5000);
+    return f;
+  }
+
+  stopAi(f) {
+    f.alive = false;
+    clearInterval(f.timer);
+    f.input.port.onmessage = null;
+    const api = window.cacamba && window.cacamba.vozes;
+    if (api) api.parar().catch(() => {});
   }
 
   // "Autotune": o padrão do Autotune Igão (estilo trap) — motor + brilho, saturação, reverb e delay

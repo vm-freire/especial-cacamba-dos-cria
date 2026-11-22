@@ -573,3 +573,19 @@ body.fs #fs-btn { display: none; }
 .vc-check { position: absolute; top: 6px; right: 6px; width: 24px; height: 24px; border-radius: 50%; background: #ffb21e; color: #1b1b1b; display: grid; place-items: center; }
 .vc-name { font-weight: 700; font-size: 13px; }
 .vcard small { color: var(--muted); font-size: 11px; margin-top: -4px; }
+
+/* vozes com IA */
+.vsec { margin: 18px 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted, #9aa); }
+.vsec-row { display: flex; align-items: center; gap: 10px; }
+.vsec-row .vsec { flex: 1; }
+.btn.sm { padding: 5px 10px; font-size: 12px; }
+.vc-over { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; background: rgba(10, 10, 14, 0.62); color: #fff; text-align: center; padding: 8px; }
+.vc-over b { font-size: 20px; }
+.vc-over small { font-size: 11px; opacity: 0.9; }
+.vc-over.dl { background: rgba(10, 10, 14, 0.4); transition: background 0.15s; }
+.vcard:hover .vc-over.dl { background: rgba(10, 10, 14, 0.6); }
+.vc-bar { width: 80%; height: 4px; border-radius: 2px; background: rgba(255, 255, 255, 0.2); overflow: hidden; }
+.vc-bar i { display: block; height: 100%; background: #ffb21e; }
+.vc-del { position: absolute; top: 6px; left: 6px; width: 22px; height: 22px; border-radius: 50%; background: rgba(0, 0, 0, 0.55); color: #fff; display: none; place-items: center; }
+.vcard:hover .vc-del { display: grid; }
+.vc-del:hover { background: #d9434b; }

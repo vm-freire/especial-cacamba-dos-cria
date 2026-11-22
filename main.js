@@ -243,6 +243,26 @@ ipcMain.on('botwin:state', (e, s) => {
   if (botWin && e.sender === botWin.webContents) send('bot-state', s);
 });
 
+// --- Vozes com IA (modelos rodando aqui mesmo, pela placa de vídeo)
+let vozesMod = null;
+const voz = () => {
+  if (!vozesMod) {
+    vozesMod = require('./dist/vozes.cjs');
+    vozesMod.setBase(path.join(app.getPath('userData'), 'vozes'));
+  }
+  return vozesMod;
+};
+const vozProg = (tipo, id) => (p) => win && !win.isDestroyed() && win.webContents.send('vozes-prog', { tipo, id, p });
+ipcMain.handle('vozes:estado', () => ({ motor: voz().motorInstalado(), tamanhoMotor: voz().MOTOR_TAMANHO, baixadas: voz().vozesBaixadas() }));
+ipcMain.handle('vozes:catalogo', (_e, forcar) => voz().lerCatalogo(!!forcar));
+ipcMain.handle('vozes:instalarMotor', () => voz().instalarMotor(vozProg('motor')));
+ipcMain.handle('vozes:baixar', (_e, id) => voz().baixarVoz(String(id), vozProg('voz', String(id))));
+ipcMain.handle('vozes:apagar', (_e, id) => voz().apagarVoz(String(id)));
+ipcMain.handle('vozes:iniciar', (_e, id, opts) => voz().iniciar(String(id), { userF0: Number(opts && opts.userF0) || 0 }));
+ipcMain.handle('vozes:processar', (_e, buf) => voz().processar(buf));
+ipcMain.handle('vozes:info', () => (vozesMod ? vozesMod.info() : null));
+ipcMain.handle('vozes:parar', () => (vozesMod ? vozesMod.parar() : null));
+
 ipcMain.handle('app:open', (_e, url) => {
   if (/^https?:/.test(url)) shell.openExternal(url);
 });

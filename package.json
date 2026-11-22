@@ -11,8 +11,9 @@
     "url": "https://github.com/vm-freire/especial-cacamba-dos-cria.git"
   },
   "scripts": {
-    "build:renderer": "esbuild src/app.js --bundle --format=esm --target=chrome120 --outfile=dist/app.js --minify --sourcemap && esbuild src/main/ytsearch.mjs --bundle --platform=node --format=cjs --target=node22 --outfile=dist/ytsearch.cjs --minify && node build/copy-rnnoise.cjs",
+    "build:renderer": "esbuild src/app.js --bundle --format=esm --target=chrome120 --outfile=dist/app.js --minify --sourcemap && esbuild src/main/ytsearch.mjs --bundle --platform=node --format=cjs --target=node22 --outfile=dist/ytsearch.cjs --minify && esbuild src/main/vozes.mjs --bundle --platform=node --format=cjs --target=node22 --outfile=dist/vozes.cjs && node build/copy-rnnoise.cjs",
     "start": "npm run build:renderer && electron .",
+    "estudio": "electron estudio",
     "dist": "npm run build:renderer && electron-builder --win --publish never",
     "release": "npm run build:renderer && electron-builder --win --publish always"
   },
