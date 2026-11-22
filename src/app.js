@@ -1211,7 +1211,7 @@ async function openBatchSounds(sv, files) {
   const m = openModal(
     `<div class="modal-head"><h3>${items.length} sons novos em ${esc(svName)}</h3><button class="ibtn" data-act="close">${icon('close')}</button></div>
      <div class="modal-body"><div class="batch-list" id="batch-list"></div>
-       <div class="hint">Dá pra mudar o nome de cada um aqui. Áudio maior que 30 s toca só os primeiros 30 s: depois é só clicar com o botão direito no som → Cortar áudio pra escolher outro pedaço.</div></div>
+       <div class="hint">Dá pra mudar o nome de cada um aqui. No ✂ você escolhe o pedaço que toca de cada som (sem escolher, toca do começo, até 30 s).</div></div>
      <div class="modal-foot"><span class="muted grow" id="batch-sum"></span><button class="btn ghost" data-act="close">Cancelar</button><button class="btn primary" id="batch-save" disabled>${icon('upload', 'sm')} Enviar todos</button></div>`,
     { wide: true }
   );
@@ -1229,13 +1229,35 @@ async function openBatchSounds(sv, files) {
               ? 'Enviando...'
               : it.state === 'ok'
                 ? '✓ Enviado'
-                : `${it.dur.toFixed(1)}s${it.dur > 30 ? ' (toca 30s)' : ''} · ${Math.round(it.file.size / 1024)} KB`
+                : it.cut
+                  ? `trecho ${it.start.toFixed(1)}–${it.end.toFixed(1)}s`
+                  : `${it.dur.toFixed(1)}s${it.dur > 30 ? ' (toca 30s)' : ''} · ${Math.round(it.file.size / 1024)} KB`
       }</span>
+      <button class="ibtn ${openTrim === i ? 'on' : ''}" data-btrim="${i}" title="Escolher o trecho" ${it.state === 'pronto' ? '' : 'disabled'}>${icon('cut', 'sm')}</button>
       <button class="ibtn" data-bplay="${i}" title="Ouvir" ${it.buf ? '' : 'disabled'}>${icon('play', 'sm')}</button>
       <button class="ibtn" data-brm="${i}" title="Tirar da lista" ${it.state === 'ok' || it.state === 'enviando' ? 'disabled' : ''}>${icon('close', 'sm')}</button>
-    </div>`;
+    </div>${openTrim === i && it.buf ? `<div class="batch-trim" id="batch-trim"></div>` : ''}`;
+  let openTrim = -1;
   const draw = () => {
     list.innerHTML = items.map((it, i) => (it.removed ? '' : row(it, i))).join('');
+    // editor de trecho do som aberto (um por vez)
+    const box = $('#batch-trim', list);
+    if (box && openTrim >= 0) {
+      const it = items[openTrim];
+      const tc = trimControls(it.buf, it.start || 0, it.end || Math.min(it.dur, 30));
+      box.innerHTML = tc.html + `<div class="row" style="justify-content:flex-end;margin-top:6px"><button type="button" class="btn ghost" data-btrim-reset="1">Som inteiro</button><button type="button" class="btn primary" data-btrim-ok="1">Pronto</button></div>`;
+      tc.bind(box);
+      const save = () => {
+        const t = tc.get();
+        it.start = t.start;
+        it.end = t.end;
+        it.cut = !t.full;
+        const info = list.querySelector(`.batch-row[data-i="${openTrim}"] .batch-info`);
+        if (info) info.textContent = it.cut ? `trecho ${it.start.toFixed(1)}–${it.end.toFixed(1)}s` : `${it.dur.toFixed(1)}s`;
+      };
+      box.querySelectorAll('input[type=range]').forEach((r) => r.addEventListener('input', save));
+      save();
+    }
     const ready = items.filter((it) => !it.removed && it.state === 'pronto');
     const btn = $('#batch-save', m);
     if (btn) btn.disabled = !ready.length || items.some((it) => it.state === 'lendo' || it.state === 'enviando');
@@ -1248,12 +1270,30 @@ async function openBatchSounds(sv, files) {
     if (i != null) items[+i].name = e.target.value;
   });
   list.addEventListener('click', (e) => {
+    const tb = e.target.closest('[data-btrim]');
+    if (tb) {
+      out.stopSounds();
+      openTrim = openTrim === +tb.dataset.btrim ? -1 : +tb.dataset.btrim;
+      return draw();
+    }
+    if (e.target.closest('[data-btrim-ok]')) {
+      out.stopSounds();
+      openTrim = -1;
+      return draw();
+    }
+    if (e.target.closest('[data-btrim-reset]')) {
+      const it = items[openTrim];
+      it.start = 0;
+      it.end = Math.min(it.dur, 30);
+      it.cut = false;
+      return draw();
+    }
     const pl = e.target.closest('[data-bplay]');
     const rm = e.target.closest('[data-brm]');
     if (pl) {
       const it = items[+pl.dataset.bplay];
       out.stopSounds();
-      out.playBuffer(it.buf, 100, 0, Math.min(it.dur, 30));
+      out.playBuffer(it.buf, 100, it.start || 0, it.end || Math.min(it.dur, 30));
     }
     if (rm) {
       items[+rm.dataset.brm].removed = true;
@@ -1299,8 +1339,8 @@ async function openBatchSounds(sv, files) {
           volume: 100,
           serverId: sv,
           img: it.img || null,
-          start: 0,
-          end: it.dur > 30 ? 30 : null,
+          start: it.cut ? it.start : 0,
+          end: it.cut ? it.end : it.dur > 30 ? 30 : null,
         });
         it.state = 'ok';
         ok++;
@@ -1573,6 +1613,7 @@ function renderControls() {
   el.innerHTML = `
     <button class="cbtn ${m ? 'off' : ''}" data-act="mute" title="Ctrl+Shift+M">${icon(m ? 'micOff' : 'mic')}</button>
     <button class="cbtn ${st.deafened ? 'off' : ''}" data-act="deafen" title="Ctrl+Shift+D">${icon(st.deafened ? 'headsetOff' : 'headset')}</button>
+ <button class="cbtn ${S.voiceFilter || st.showVoices ? 'on' : ''}" data-act="voice-fx" title="Filtros de voz">${icon('fx')}</button>
     <button class="cbtn ${st.cam ? 'on' : ''}" data-act="cam" title="${st.cam ? 'Desligar câmera' : 'Ligar câmera'}">${icon(st.cam ? 'cam' : 'camOff')}</button>
     <button class="cbtn ${st.sharing ? 'live' : ''}" data-act="share">${icon(st.sharing ? 'screenOff' : 'screen')} ${st.sharing ? 'Parar transmissão' : 'Compartilhar tela'}</button>
     <button class="cbtn ${st.showSB ? 'on' : ''}" data-act="toggle-sb" title="Soundboard">${icon('sound')}</button>
@@ -2095,6 +2136,12 @@ function msgMenu(e, id) {
 function renderStage() {
   const el = $('#stage');
   if (!el) return;
+  if (st.showVoices) {
+    tileEls.clear();
+    stageSig = '';
+    stopChat();
+    return renderVoices(el);
+  }
   if (st.view === 'home') {
     tileEls.clear();
     stageSig = '';
@@ -2791,8 +2838,8 @@ function serverMenu(btn) {
 // ---------------------------------------------------------------- menus de contexto
 // filtros de voz: um clique e já sai com o efeito (todo mundo da call escuta)
 const VOICE_FX = [
-  { id: '', name: 'Voz normal' },
-  { id: 'autotune', name: 'Autotune' },
+  { id: '', name: 'Voz normal', desc: 'Sem filtro' },
+  { id: 'autotune', name: 'Autotune', desc: 'Estilo trap do Autotune Igão' },
 ];
 async function setVoiceFilter(id) {
   S.voiceFilter = id;
@@ -2800,8 +2847,44 @@ async function setVoiceFilter(id) {
   if (!mic) await ensureMic();
   if (mic) await mic.update({ ...S });
   renderUserPanel();
+  renderControls();
   toast(id ? `Filtro ligado: ${VOICE_FX.find((f) => f.id === id).name}` : 'Voz normal de volta');
 }
+// tela de vozes (área principal): cartões com foto; sem foto = cartão genérico com o nome
+function voiceCard(f) {
+  const on = S.voiceFilter === f.id;
+  const pic = f.img
+    ? `<img src="${esc(f.img)}" alt=""/>`
+    : `<div class="vc-generic" style="--h:${[...f.name].reduce((a, ch) => a + ch.charCodeAt(0), 0) % 360}">${f.id ? icon('fx') : icon('mic')}<b>${esc(f.name)}</b></div>`;
+  return `<button class="vcard ${on ? 'on' : ''}" data-act="pick-voice" data-id="${esc(f.id)}" title="${esc(f.name)}">
+    <div class="vc-pic">${pic}${on ? `<span class="vc-check">${icon('check', 'sm')}</span>` : ''}</div>
+    <span class="vc-name ellipsis">${esc(f.name)}</span>${f.desc ? `<small class="ellipsis">${esc(f.desc)}</small>` : ''}</button>`;
+}
+function renderVoices(el) {
+  const cur = VOICE_FX.find((f) => f.id === S.voiceFilter) || VOICE_FX[0];
+  const q = (st.voiceQuery || '').toLowerCase();
+  const list = VOICE_FX.filter((f) => !q || f.name.toLowerCase().includes(q));
+  el.innerHTML = `<div class="voices">
+    <div class="voices-head">
+      <div class="grow"><h2>${icon('fx')} Filtros de voz</h2><small class="muted">Agora: <b>${esc(cur.name)}</b>${st.roomId ? ' · todo mundo da call ouve' : ' · entra numa call pra usar'}</small></div>
+      <input type="search" id="voice-q" placeholder="Procurar voz" value="${esc(st.voiceQuery || '')}"/>
+      <button class="btn ${mic && mic.monitoring ? 'primary' : 'ghost'}" data-act="voices-monitor" title="Ouvir minha própria voz no fone">${icon('headset', 'sm')} ${mic && mic.monitoring ? 'Me ouvindo' : 'Me ouvir'}</button>
+      <button class="ibtn" data-act="voices-close" title="Fechar">${icon('close')}</button>
+    </div>
+    <div class="vgrid">${list.map(voiceCard).join('') || '<div class="hint">Nenhuma voz com esse nome.</div>'}</div>
+    <div class="hint" style="margin-top:12px">Use fone pra se ouvir sem microfonia. A voz escolhida fica salva até você trocar.</div>
+  </div>`;
+  const qi = $('#voice-q', el);
+  qi.addEventListener('input', () => {
+    st.voiceQuery = qi.value;
+    const pos = qi.selectionStart;
+    renderVoices(el);
+    const n = $('#voice-q', el);
+    n.focus();
+    n.setSelectionRange(pos, pos);
+  });
+}
+
 function voiceFxMenu(x, y) {
   const c = openCtx(
     x,
@@ -3307,12 +3390,26 @@ document.addEventListener('click', async (e) => {
       isFullscreen = await bridge.setFullscreen();
       renderFsButton();
       break;
-    case 'voice-fx': {
-      e.stopPropagation();
-      const r = b.getBoundingClientRect();
-      voiceFxMenu(r.left, r.top - 8);
+    case 'voice-fx':
+      st.showVoices = !st.showVoices;
+      renderHead();
+      renderStage();
+      renderControls();
       break;
-    }
+    case 'voices-close':
+      st.showVoices = false;
+      renderHead();
+      renderStage();
+      renderControls();
+      break;
+    case 'pick-voice':
+      setVoiceFilter(b.dataset.id).then(() => st.showVoices && renderStage());
+      break;
+    case 'voices-monitor':
+      if (!mic) await ensureMic();
+      if (mic) await mic.setMonitor(!mic.monitoring, S.outputDevice);
+      renderStage();
+      break;
     case 'toggle-monitor': {
       if (!mic) await ensureMic();
       if (!mic) break;

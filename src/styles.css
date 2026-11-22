@@ -30,7 +30,7 @@ body {
 }
 button, input, select { font: inherit; color: inherit; }
 button { cursor: pointer; border: 0; background: none; }
-input[type='text'], input[type='email'], input[type='password'], select {
+input[type='text'], input[type='search'], input[type='email'], input[type='password'], select {
   width: 100%;
   background: var(--bg0);
   border: 1px solid var(--line);
@@ -553,3 +553,23 @@ body.fs #fs-btn { display: none; }
 /* filtro de voz ligado */
 .ibtn.fx-on { color: #ffb21e; background: rgba(255,178,30,.14); }
 .ctx .item.on { color: #ffb21e; }
+.batch-trim { background: var(--bg2); border: 1px solid var(--bg4); border-radius: 8px; padding: 10px; margin: -2px 0 4px; }
+/* tela de filtros de voz */
+.voices { padding: 20px 24px; overflow-y: auto; height: 100%; box-sizing: border-box; }
+.voices-head { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
+.voices-head h2 { display: flex; align-items: center; gap: 8px; margin: 0 0 2px; font-size: 18px; }
+.voices-head h2 .icon { color: #ffb21e; }
+.voices-head input[type='search'] { width: 200px; }
+.vgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; }
+.vcard { display: flex; flex-direction: column; gap: 6px; padding: 8px; border-radius: 12px; background: var(--bg2); border: 2px solid transparent; text-align: left; min-width: 0; }
+.vcard:hover { background: var(--bg3); }
+.vcard.on { border-color: #ffb21e; background: rgba(255,178,30,.08); }
+.vc-pic { position: relative; aspect-ratio: 1; border-radius: 9px; overflow: hidden; background: var(--bg3); }
+.vc-pic img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.vc-generic { width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 10px; box-sizing: border-box;
+  background: linear-gradient(135deg, hsl(var(--h) 45% 32%), hsl(calc(var(--h) + 40) 50% 18%)); color: #fff; text-align: center; }
+.vc-generic .icon { width: 34px; height: 34px; opacity: .85; }
+.vc-generic b { font-size: 14px; line-height: 1.2; word-break: break-word; }
+.vc-check { position: absolute; top: 6px; right: 6px; width: 24px; height: 24px; border-radius: 50%; background: #ffb21e; color: #1b1b1b; display: grid; place-items: center; }
+.vc-name { font-weight: 700; font-size: 13px; }
+.vcard small { color: var(--muted); font-size: 11px; margin-top: -4px; }
