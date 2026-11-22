@@ -230,6 +230,10 @@ export class OutputMixer {
     this.voices.set(key, { el, src, gain, analyser });
   }
 
+  setVolumeWhere(test, volume) {
+    for (const k of this.voices.keys()) if (test(k)) this.setTrackVolume(k, volume);
+  }
+
   setTrackVolume(key, volume) {
     const v = this.voices.get(key);
     if (v) v.gain.gain.setTargetAtTime(volume / 100, this.ctx.currentTime, 0.02);
@@ -253,7 +257,8 @@ export class OutputMixer {
     for (const k of [...this.voices.keys()]) this.removeTrack(k);
   }
 
-  playBuffer(buffer, volume = 100) {
+  // start/end em segundos: toca só o pedaço escolhido no corte do som
+  playBuffer(buffer, volume = 100, start = 0, end = null) {
     this.resume();
     const node = this.ctx.createBufferSource();
     node.buffer = buffer;
@@ -261,7 +266,9 @@ export class OutputMixer {
     g.gain.value = volume / 100;
     node.connect(g);
     g.connect(this.sfx);
-    node.start();
+    const s0 = Math.max(0, Math.min(start || 0, buffer.duration - 0.05));
+    const e0 = end && end > s0 ? Math.min(end, buffer.duration) : buffer.duration;
+    node.start(0, s0, e0 - s0);
     this.activeSounds.add(node);
     node.onended = () => this.activeSounds.delete(node);
   }

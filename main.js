@@ -162,6 +162,87 @@ ipcMain.handle('screen:select', (_e, sel) => {
 });
 
 ipcMain.handle('app:version', () => app.getVersion());
+// ---------------------------------------------------------------- bot de música
+// O som vem do player do próprio YouTube, numa janela escondida e muda; o app captura só o áudio
+// dela (captura de aba) e manda pra chamada. A busca usa dist/ytsearch.cjs.
+let botWin = null;
+let ytsearch = null;
+const yts = () => (ytsearch = ytsearch || require('./dist/ytsearch.cjs'));
+
+function ensureBotWin() {
+  if (botWin && !botWin.isDestroyed()) return botWin;
+  botWin = new BrowserWindow({
+    show: false,
+    width: 640,
+    height: 400,
+    webPreferences: {
+      partition: 'persist:musicbot',
+      preload: path.join(__dirname, 'bot-preload.js'),
+      backgroundThrottling: false,
+      contextIsolation: true,
+      sandbox: true,
+      autoplayPolicy: 'no-user-gesture-required',
+    },
+  });
+  const ses = botWin.webContents.session;
+  // nega tudo pro YouTube; só deixa o próprio app (file://) capturar o áudio dessa janela
+  ses.setPermissionRequestHandler((_wc, p, cb, d) => cb(p === 'display-capture' && String((d && d.securityOrigin) || '').startsWith('file://')));
+  botWin.webContents.setAudioMuted(true); // não toca no PC duas vezes: o som sai pela captura
+  botWin.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  botWin.on('closed', () => {
+    botWin = null;
+    send('bot-state', { gone: true });
+  });
+  return botWin;
+}
+
+async function botLoad(id) {
+  const w = ensureBotWin();
+  const url = 'https://www.youtube.com/watch?v=' + id;
+  w.webContents.send('botwin:ctl', { type: 'reset' });
+  const cur = w.webContents.getURL();
+  if (/youtube\.com\/watch/.test(cur)) {
+    const ok = await w.webContents
+      .executeJavaScript(`(()=>{const p=document.querySelector('#movie_player'); if(!p||!p.loadVideoById) return false; p.loadVideoById(${JSON.stringify(id)}); return true})()`)
+      .catch(() => false);
+    if (ok) return lowQuality(w);
+  }
+  await w.loadURL(url).catch(() => {});
+  lowQuality(w);
+}
+
+// o vídeo nem aparece: pede a menor qualidade pra gastar pouca internet/PC
+function lowQuality(w) {
+  let n = 0;
+  const tick = () => {
+    if (!w || w.isDestroyed() || n++ > 10) return;
+    w.webContents
+      .executeJavaScript(`(()=>{const p=document.querySelector('#movie_player'); if(p&&p.setPlaybackQualityRange){p.setPlaybackQualityRange('tiny','tiny'); return true} return false})()`)
+      .then((ok) => !ok && setTimeout(tick, 1000))
+      .catch(() => setTimeout(tick, 1000));
+  };
+  setTimeout(tick, 1500);
+}
+
+ipcMain.handle('bot:open', () => {
+  const w = ensureBotWin();
+  if (!w.webContents.getURL()) w.loadURL('about:blank').catch(() => {});
+  return w.webContents.getMediaSourceId(win.webContents);
+});
+ipcMain.handle('bot:play', (_e, id) => (/^[\w-]{11}$/.test(id) ? botLoad(id) : null));
+ipcMain.handle('bot:ctl', (_e, c) => {
+  if (botWin && !botWin.isDestroyed()) botWin.webContents.send('botwin:ctl', c);
+});
+ipcMain.handle('bot:close', () => {
+  if (botWin && !botWin.isDestroyed()) botWin.destroy();
+  botWin = null;
+});
+ipcMain.handle('bot:search', (_e, q, n) => yts().search(String(q).slice(0, 200), n));
+ipcMain.handle('bot:related', (_e, id) => yts().related(id));
+ipcMain.on('botwin:state', (e, s) => {
+  if (botWin && e.sender === botWin.webContents) send('bot-state', s);
+});
+
 ipcMain.handle('app:open', (_e, url) => {
   if (/^https?:/.test(url)) shell.openExternal(url);
 });

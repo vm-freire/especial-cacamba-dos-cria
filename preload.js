@@ -15,5 +15,14 @@ contextBridge.exposeInMainWorld('cacamba', {
   onFullscreen: (cb) => ipcRenderer.on('fullscreen', (_e, on) => cb(on)),
   onShortcut: (cb) => ipcRenderer.on('shortcut', (_e, name) => cb(name)),
   onUpdate: (cb) => ipcRenderer.on('update', (_e, info) => cb(info)),
+  bot: {
+    open: () => ipcRenderer.invoke('bot:open'),
+    play: (id) => ipcRenderer.invoke('bot:play', id),
+    ctl: (c) => ipcRenderer.invoke('bot:ctl', c),
+    close: () => ipcRenderer.invoke('bot:close'),
+    search: (q, n) => ipcRenderer.invoke('bot:search', q, n),
+    related: (id) => ipcRenderer.invoke('bot:related', id),
+    onState: (cb) => ipcRenderer.on('bot-state', (_e, s) => cb(s)),
+  },
   platform: process.platform,
 });

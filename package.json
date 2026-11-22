@@ -1,7 +1,7 @@
 {
   "name": "especial-cacamba-dos-cria",
   "productName": "Especial Caçamba dos Cria",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "Chamada de voz, compartilhamento de tela e soundboard só para os cria.",
   "main": "main.js",
   "author": "Vitor Freire",
@@ -11,7 +11,7 @@
     "url": "https://github.com/vm-freire/especial-cacamba-dos-cria.git"
   },
   "scripts": {
-    "build:renderer": "esbuild src/app.js --bundle --format=esm --target=chrome120 --outfile=dist/app.js --minify --sourcemap",
+    "build:renderer": "esbuild src/app.js --bundle --format=esm --target=chrome120 --outfile=dist/app.js --minify --sourcemap && esbuild src/main/ytsearch.mjs --bundle --platform=node --format=cjs --target=node22 --outfile=dist/ytsearch.cjs --minify",
     "start": "npm run build:renderer && electron .",
     "dist": "npm run build:renderer && electron-builder --win --publish never",
     "release": "npm run build:renderer && electron-builder --win --publish always"
@@ -23,6 +23,7 @@
     "files": [
       "main.js",
       "preload.js",
+      "bot-preload.js",
       "src/index.html",
       "src/styles.css",
       "src/grupo.jpg",
@@ -67,6 +68,7 @@
     "electron": "^45.4.1",
     "electron-builder": "^26.18.0",
     "esbuild": "^0.28.2",
-    "firebase": "^13.4.0"
+    "firebase": "^13.4.0",
+    "youtubei.js": "^18.3.0"
   }
 }

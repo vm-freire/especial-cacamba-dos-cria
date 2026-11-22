@@ -1,8 +1,8 @@
 // WebRTC em malha (cada um conecta direto com cada um — sem servidor de mídia no meio)
-// Transceivers fixos: [0] voz, [1] vídeo da tela, [2] áudio da tela.
+// Transceivers fixos: [0] voz, [1] vídeo da tela, [2] áudio da tela, [3] música do bot.
 // Começar/parar a transmissão é só replaceTrack -> instantâneo, sem renegociar.
 
-const ROLES = ['mic', 'screen-video', 'screen-audio'];
+const ROLES = ['mic', 'screen-video', 'screen-audio', 'bot'];
 
 export const SCREEN_PRESETS = {
   '720p30': { label: '720p • 30 FPS', w: 1280, h: 720, fps: 30, bitrate: 2_500_000 },
@@ -35,7 +35,7 @@ function preferCodec(transceiver, codec) {
 function tuneOpus(sdp) {
   return sdp.replace(/a=fmtp:(\d+) (.*useinbandfec=1.*)/g, (line, pt, params) => {
     if (/maxaveragebitrate/.test(params)) return line;
-    return `a=fmtp:${pt} ${params};maxaveragebitrate=96000;usedtx=0`;
+    return `a=fmtp:${pt} ${params};maxaveragebitrate=96000;usedtx=0;stereo=1;sprop-stereo=1`;
   });
 }
 
@@ -96,6 +96,7 @@ class Peer {
         pc.addTransceiver('audio', { direction: 'sendrecv' }),
         pc.addTransceiver('video', { direction: 'sendrecv' }),
         pc.addTransceiver('audio', { direction: 'sendrecv' }),
+        pc.addTransceiver('audio', { direction: 'sendrecv' }),
       ];
       this.attachLocal();
     }
@@ -124,6 +125,7 @@ class Peer {
     this.tx[0].sender.replaceTrack(m.micTrack || null);
     this.tx[1].sender.replaceTrack(m.screenVideo || null);
     this.tx[2].sender.replaceTrack(m.screenAudio || null);
+    if (this.tx[3]) this.tx[3].sender.replaceTrack(m.botTrack || null);
   }
 
   async handle(data) {
@@ -134,7 +136,7 @@ class Peer {
         if (this.initiator) return; // nunca deveria acontecer
         await pc.setRemoteDescription(desc);
         if (!this.tx) {
-          this.tx = pc.getTransceivers().slice(0, 3);
+          this.tx = pc.getTransceivers().slice(0, 4); // versões antigas mandam só 3 (sem bot)
           this.tx.forEach((t) => (t.direction = 'sendrecv'));
           this.attachLocal();
         }
@@ -269,6 +271,11 @@ export class Mesh {
     } catch (e) {
       console.error('signal', e);
     }
+  }
+
+  setBotTrack(track) {
+    this.botTrack = track;
+    for (const p of this.peers.values()) if (p.tx && p.tx[3]) p.tx[3].sender.replaceTrack(track).catch(() => {});
   }
 
   setMicTrack(track) {

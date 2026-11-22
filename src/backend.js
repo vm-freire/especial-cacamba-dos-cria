@@ -250,15 +250,44 @@ export function watchMessages(roomId, cb) {
     (e) => console.error('mensagens', e)
   );
 }
-export const sendMessage = (roomId, me, text) =>
+export const sendMessage = (roomId, me, text, extra = {}) =>
   addDoc(collection(db, 'rooms', roomId, 'messages'), {
     uid: me.uid,
     name: me.name,
     color: me.color || null,
-    text: text.slice(0, 2000),
+    text: (text || '').slice(0, 2000),
     at: Date.now(),
     ts: serverTimestamp(),
+    ...extra,
   });
+
+// ---- anexos (imagens e arquivos pequenos): o conteúdo fica num documento próprio (até ~700 KB)
+export async function uploadAttachment({ serverId, roomId, uid, name, type, size, data }) {
+  const ref = await addDoc(collection(db, 'attachments'), { serverId, roomId, uid, name: name.slice(0, 120), type: type || '', size, data, at: Date.now() });
+  return ref.id;
+}
+export async function getAttachment(id) {
+  const snap = await getDoc(doc(db, 'attachments', id));
+  return snap.exists() ? snap.data() : null;
+}
+
+// ---- bot de música: estado em /bots/{servidor}, pedidos em /bots/{servidor}/cmds
+export function watchBot(serverId, cb) {
+  return onSnapshot(doc(db, 'bots', serverId), (snap) => cb(snap.exists() ? snap.data() : null), () => cb(null));
+}
+export const setBot = (serverId, data) => setDoc(doc(db, 'bots', serverId), data);
+export const updateBot = (serverId, data) => updateDoc(doc(db, 'bots', serverId), data);
+export const clearBot = (serverId) => deleteDoc(doc(db, 'bots', serverId));
+export const sendBotCmd = (serverId, cmd) => addDoc(collection(db, 'bots', serverId, 'cmds'), { ...cmd, at: Date.now() });
+export function watchBotCmds(serverId, cb) {
+  return onSnapshot(collection(db, 'bots', serverId, 'cmds'), (snap) => {
+    const list = [];
+    snap.docChanges().forEach((c) => c.type === 'added' && list.push({ id: c.doc.id, ...c.doc.data() }));
+    list.sort((a, b) => (a.at || 0) - (b.at || 0));
+    if (list.length) cb(list);
+  });
+}
+export const deleteBotCmd = (serverId, id) => deleteDoc(doc(db, 'bots', serverId, 'cmds', id));
 export const deleteMessage = (roomId, id) => deleteDoc(doc(db, 'rooms', roomId, 'messages', id));
 
 export async function findServerByCode(code) {
@@ -389,13 +418,17 @@ export function watchSounds(cb) {
   });
 }
 
-export async function uploadSound({ uid, name, emoji, dataUrl, volume }) {
+export async function uploadSound({ uid, name, emoji, dataUrl, volume, serverId, img, start, end }) {
   const dataRef = await addDoc(collection(db, 'soundData'), { data: dataUrl });
   await setDoc(doc(db, 'sounds', dataRef.id), {
     uid,
     name: name.slice(0, 40),
     emoji: emoji || '🔊',
     volume: volume ?? 100,
+    serverId: serverId || null,
+    img: img || null,
+    start: start || 0,
+    end: end || null,
     createdAt: serverTimestamp(),
   });
   return dataRef.id;

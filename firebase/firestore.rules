@@ -63,10 +63,29 @@ service cloud.firestore {
         allow read: if member() && inServer(roomServer());
         allow create: if member() && inServer(roomServer())
           && request.resource.data.uid == request.auth.uid
-          && request.resource.data.text is string
-          && request.resource.data.text.size() > 0 && request.resource.data.text.size() <= 2000;
+          && request.resource.data.text is string && request.resource.data.text.size() <= 2000
+          && (request.resource.data.text.size() > 0
+              || (request.resource.data.get('files', []) is list && request.resource.data.get('files', []).size() > 0))
+          && (!('files' in request.resource.data) || request.resource.data.files.size() <= 6);
         allow delete: if signedIn() && (resource.data.uid == request.auth.uid
           || get(/databases/$(db)/documents/servers/$(roomServer())).data.ownerId == request.auth.uid);
+      }
+    }
+
+    // anexos do chat (o conteúdo em base64 fica aqui; a mensagem só aponta pro id)
+    match /attachments/{id} {
+      allow get: if member() && inServer(resource.data.serverId);
+      allow create: if member() && inServer(request.resource.data.serverId)
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.data is string && request.resource.data.data.size() < 1000000;
+      allow delete: if signedIn() && resource.data.uid == request.auth.uid;
+    }
+
+    // bot de música: um por servidor
+    match /bots/{serverId} {
+      allow read, write: if member() && inServer(serverId);
+      match /cmds/{c} {
+        allow read, create, delete: if member() && inServer(serverId);
       }
     }
 

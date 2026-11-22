@@ -4,6 +4,7 @@ import { MicPipeline, OutputMixer } from './audio.js';
 import { Mesh, SCREEN_PRESETS } from './rtc.js';
 import { icon } from './icons.js';
 import { Sfx } from './sfx.js';
+import { createMusicBot, parseCommand, isBotActive, fmtDur } from './bot.js';
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -49,6 +50,7 @@ const DEFAULTS = {
   uiSounds: true,
   userVolumes: {},
   screenVolumes: {},
+  botVolume: 70,
   turnUrl: '',
   turnUser: '',
   turnPass: '',
@@ -113,10 +115,29 @@ const st = {
   msgs: [],
   msgCh: null,
   msgUnsub: null,
+  bot: null, // estado do bot de música do servidor aberto
+  botServer: null,
+  botUnsub: null,
+  ephemeral: [], // avisos que só eu vejo no chat
+  pendingFiles: [], // anexos esperando enviar
+  musResults: [],
 };
 let mic = null;
 let mesh = null;
 const out = new OutputMixer();
+const bot = createMusicBot({
+  B,
+  bridge,
+  out,
+  st,
+  S,
+  getMesh: () => mesh,
+  onChange: () => {
+    renderBotBar();
+    renderSidebar();
+  },
+  roomName: (id) => st.rooms.find((r) => r.id === id)?.name || 'canal',
+});
 out.setVolume(S.outputVolume);
 out.setSfxVolume(S.sfxVolume);
 applyOutputDevice();
@@ -404,6 +425,16 @@ function setView(view, silent = false) {
     st.textId = null;
     st.mode = st.roomId && st.roomServerId === view ? 'stage' : 'chat';
     B.ensureGeral(view).catch((e) => console.warn('geral', e));
+    if (st.botUnsub) st.botUnsub();
+    st.bot = null;
+    st.botServer = view;
+    st.botUnsub = B.watchBot(view, (b) => {
+      if (st.botServer !== view) return;
+      st.bot = b;
+      renderBotBar();
+      renderSidebar();
+      updateMusicModal();
+    });
     st.roomsUnsub = B.watchRooms(view, (rooms) => {
       st.rooms = rooms;
       renderSidebar();
@@ -545,6 +576,7 @@ async function joinRoom(roomId) {
     onPeerGone: (sid) => {
       out.removeTrack(sid + ':mic');
       out.removeTrack(sid + ':screen');
+      out.removeTrack(sid + ':bot');
       st.remote.delete(sid);
       delete st.conn[sid];
       delete st.ping[sid];
@@ -560,6 +592,7 @@ async function joinRoom(roomId) {
 
 async function leaveRoom(silent = false) {
   if (!st.roomId) return;
+  if (bot.amHost()) await bot.stop().catch(() => {});
   if (st.sharing) await stopShare(true);
   if (mesh) mesh.closeAll();
   mesh = null;
@@ -596,6 +629,8 @@ function onRemoteTrack(sid, role, track) {
     out.addTrack(sid + ':screen', track, S.screenVolumes[uid] ?? 100);
   } else if (role === 'screen-video') {
     r.screenVideo = track;
+  } else if (role === 'bot') {
+    out.addTrack(sid + ':bot', track, S.botVolume ?? 70);
   }
   st.remote.set(sid, r);
   renderStage();
@@ -805,13 +840,14 @@ async function playSound(id, fromName = null) {
   if (!snd) return;
   try {
     const buf = await loadSound(id);
-    out.playBuffer(buf, snd.volume ?? 100);
+    out.playBuffer(buf, snd.volume ?? 100, snd.start || 0, snd.end || null);
     const el = $(`.sound[data-id="${id}"]`);
     if (el) {
       el.classList.add('playing');
-      setTimeout(() => el.classList.remove('playing'), Math.min(buf.duration * 1000, 4000));
+      const len = (snd.end || buf.duration) - (snd.start || 0);
+      setTimeout(() => el.classList.remove('playing'), Math.min(len * 1000, 4000));
     }
-    if (fromName) sfxPop(`${fromName} tocou ${snd.emoji || '🔊'} ${snd.name}`);
+    if (fromName) sfxPop(`${fromName} tocou 🔊 ${snd.name}`);
   } catch (e) {
     console.error(e);
   }
@@ -835,22 +871,163 @@ function sfxPop(text) {
   setTimeout(() => el.remove(), 2200);
 }
 
+// ---------------------------------------------------------------- soundboard (por servidor)
+const sbServer = () => (st.view !== 'home' ? st.view : st.roomServerId || null);
+const visibleSounds = () => {
+  const sv = sbServer();
+  return st.sounds.filter((x) => (x.serverId ? x.serverId === sv : true));
+};
+
+// capa embutida no MP3 (ID3v2 APIC), se tiver
+function id3Cover(ab) {
+  const b = new Uint8Array(ab);
+  if (b.length < 20 || b[0] !== 0x49 || b[1] !== 0x44 || b[2] !== 0x33) return null;
+  const ver = b[3];
+  const syn = (o) => ((b[o] & 0x7f) << 21) | ((b[o + 1] & 0x7f) << 14) | ((b[o + 2] & 0x7f) << 7) | (b[o + 3] & 0x7f);
+  const u32 = (o) => ((b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]) >>> 0;
+  const end = Math.min(10 + syn(6), b.length);
+  let p = 10;
+  if (b[5] & 0x40) p += ver === 4 ? syn(10) : u32(10) + 4;
+  while (p + 10 < end) {
+    const id = String.fromCharCode(b[p], b[p + 1], b[p + 2], b[p + 3]);
+    if (!/^[A-Z0-9]{4}$/.test(id)) break;
+    const fs = ver === 4 ? syn(p + 4) : u32(p + 4);
+    const fe = Math.min(p + 10 + fs, end);
+    if (id === 'APIC') {
+      let q = p + 10;
+      const enc = b[q++];
+      let mime = '';
+      while (q < fe && b[q]) mime += String.fromCharCode(b[q++]);
+      q += 2; // fim do mime + tipo da imagem
+      if (enc === 1 || enc === 2) {
+        while (q + 1 < fe && !(b[q] === 0 && b[q + 1] === 0)) q += 2;
+        q += 2;
+      } else {
+        while (q < fe && b[q]) q++;
+        q++;
+      }
+      return q < fe ? new Blob([b.slice(q, fe)], { type: mime.includes('/') ? mime : 'image/jpeg' }) : null;
+    }
+    p += 10 + fs;
+  }
+  return null;
+}
+
+// imagem -> quadradinho JPEG (corte no centro)
+async function squareThumb(blobOrUrl, size = 128) {
+  const url = typeof blobOrUrl === 'string' ? blobOrUrl : URL.createObjectURL(blobOrUrl);
+  try {
+    const img = await new Promise((res, rej) => {
+      const im = new Image();
+      im.onload = () => res(im);
+      im.onerror = rej;
+      im.src = url;
+    });
+    const c = document.createElement('canvas');
+    c.width = c.height = size;
+    const side = Math.min(img.naturalWidth, img.naturalHeight);
+    c.getContext('2d').drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, size, size);
+    return c.toDataURL('image/jpeg', 0.85);
+  } finally {
+    if (typeof blobOrUrl !== 'string') URL.revokeObjectURL(url);
+  }
+}
+
+const soundIcon = (snd) =>
+  snd && snd.img ? `<img src="${esc(snd.img)}" alt=""/>` : `<span class="mp3">${icon('music', 'sm')}<i>MP3</i></span>`;
+
+function drawWave(canvas, buf, start, end) {
+  const g = canvas.getContext('2d');
+  const W = canvas.width;
+  const H = canvas.height;
+  g.clearRect(0, 0, W, H);
+  const data = buf.getChannelData(0);
+  const step = Math.max(1, Math.floor(data.length / W));
+  const a = (start / buf.duration) * W;
+  const b = (end / buf.duration) * W;
+  g.fillStyle = 'rgba(255,178,30,.12)';
+  g.fillRect(a, 0, b - a, H);
+  for (let x = 0; x < W; x++) {
+    let mx = 0;
+    for (let i = x * step, e = Math.min(data.length, i + step); i < e; i += 4) mx = Math.max(mx, Math.abs(data[i]));
+    const h = Math.max(1, mx * H * 0.95);
+    g.fillStyle = x >= a && x <= b ? '#ffb21e' : '#4e5058';
+    g.fillRect(x, (H - h) / 2, 1, h);
+  }
+  g.fillStyle = '#fff';
+  g.fillRect(a, 0, 2, H);
+  g.fillRect(b - 2, 0, 2, H);
+}
+
+// janela de corte: escolhe o pedaço do áudio que toca (máx. 30 s)
+function trimControls(buf, start, end) {
+  const dur = buf.duration;
+  start = Math.max(0, Math.min(start || 0, dur));
+  end = end && end > start ? Math.min(end, dur) : Math.min(dur, start + 30);
+  const html = `
+    <div class="trim">
+      <canvas id="tw" width="560" height="80"></canvas>
+      <div class="field"><label>Começo: <b id="ts"></b></label><input type="range" id="tr-s" min="0" max="${dur.toFixed(2)}" step="0.05" value="${start}"/></div>
+      <div class="field"><label>Fim: <b id="te"></b></label><input type="range" id="tr-e" min="0" max="${dur.toFixed(2)}" step="0.05" value="${end}"/></div>
+      <div class="row"><button type="button" class="btn" id="tr-play">${icon('play', 'sm')} Ouvir o trecho</button><span class="muted" id="tlen"></span></div>
+    </div>`;
+  const bind = (root) => {
+    const sI = $('#tr-s', root);
+    const eI = $('#tr-e', root);
+    const cv = $('#tw', root);
+    const upd = (who) => {
+      let a = +sI.value;
+      let b = +eI.value;
+      if (b <= a + 0.1) {
+        if (who === 's') a = Math.max(0, b - 0.1);
+        else b = Math.min(dur, a + 0.1);
+      }
+      if (b - a > 30) {
+        if (who === 's') b = a + 30;
+        else a = b - 30;
+      }
+      sI.value = a;
+      eI.value = b;
+      start = a;
+      end = b;
+      $('#ts', root).textContent = a.toFixed(1) + 's';
+      $('#te', root).textContent = b.toFixed(1) + 's';
+      $('#tlen', root).textContent = `Trecho de ${(b - a).toFixed(1)}s (de ${dur.toFixed(1)}s)`;
+      drawWave(cv, buf, a, b);
+    };
+    sI.addEventListener('input', () => upd('s'));
+    eI.addEventListener('input', () => upd('e'));
+    $('#tr-play', root).addEventListener('click', () => {
+      out.stopSounds();
+      out.playBuffer(buf, 100, start, end);
+    });
+    upd('e');
+  };
+  return { html, bind, get: () => ({ start: +start.toFixed(2), end: +end.toFixed(2), full: start <= 0.01 && end >= dur - 0.01 }) };
+}
+
 function openUploadSound() {
+  const sv = sbServer();
+  if (!sv) return toast('Abre um servidor primeiro: os sons ficam salvos por servidor.', true);
   const input = document.createElement('input');
   input.type = 'file';
   input.accept = 'audio/*,.mp3,.wav,.ogg,.m4a';
   input.onchange = async () => {
     const file = input.files[0];
     if (!file) return;
-    if (file.size > 700 * 1024) return toast('Arquivo muito grande (máx. 700 KB). Corta o áudio.', true);
-    let duration = 0;
+    if (file.size > 700 * 1024) return toast('Arquivo muito grande (máx. 700 KB). Corta o áudio antes ou usa um MP3 menor.', true);
+    let buf;
+    const ab = await file.arrayBuffer();
     try {
-      const buf = await out.decode(await file.arrayBuffer());
-      duration = buf.duration;
+      buf = await out.decode(ab.slice(0));
     } catch (_) {
       return toast('Formato de áudio não suportado.', true);
     }
-    if (duration > 30) return toast('Som muito longo (máx. 30 segundos).', true);
+    let img = null;
+    try {
+      const cover = id3Cover(ab);
+      if (cover) img = await squareThumb(cover);
+    } catch (_) {}
     const dataUrl = await new Promise((res, rej) => {
       const r = new FileReader();
       r.onload = () => res(r.result);
@@ -858,35 +1035,61 @@ function openUploadSound() {
       r.readAsDataURL(file);
     });
     const base = file.name.replace(/\.[^.]+$/, '').slice(0, 40);
-    const emojis = ['🔊', '😂', '💀', '🔥', '🤡', '🐐', '💥', '🚨', '👏', '😱', '🗑️', '🎺'];
-    openModal(`
-      <div class="modal-head"><h3>Novo som</h3><button class="ibtn" data-act="close">${icon('close')}</button></div>
+    const trim = trimControls(buf, 0, Math.min(buf.duration, 30));
+    const svName = st.servers.find((x) => x.id === sv)?.name || '';
+    const m = openModal(
+      `
+      <div class="modal-head"><h3>Novo som em ${esc(svName)}</h3><button class="ibtn" data-act="close">${icon('close')}</button></div>
       <form id="snd-form" class="modal-body">
-        <div class="field"><label>Nome</label><input type="text" name="name" maxlength="40" required value="${esc(base)}"/></div>
-        <div class="field"><label>Emoji</label>
-          <div class="row" style="flex-wrap:wrap;gap:6px">${emojis
-            .map((e, i) => `<label class="btn ghost" style="padding:6px 8px;font-size:18px"><input type="radio" name="emoji" value="${e}" ${i === 0 ? 'checked' : ''} style="display:none"/>${e}</label>`)
-            .join('')}</div></div>
-        <div class="field"><label>Volume do som: <span id="sv">100</span>%</label><input type="range" name="volume" min="10" max="200" value="100" oninput=""/></div>
-        <div class="hint">${duration.toFixed(1)}s • ${(file.size / 1024).toFixed(0)} KB</div>
+        <div class="row" style="align-items:flex-start;gap:14px">
+          <div class="snd-cover" id="snd-cover">${soundIcon({ img })}</div>
+          <div class="grow">
+            <div class="field"><label>Nome</label><input type="text" name="name" maxlength="40" required value="${esc(base)}"/></div>
+            <div class="row"><button type="button" class="btn ghost" id="snd-img">${icon('image', 'sm')} Trocar imagem</button><button type="button" class="btn ghost" id="snd-img-x">Sem imagem</button></div>
+          </div>
+        </div>
+        <div class="label">Pedaço que vai tocar</div>
+        ${trim.html}
+        <div class="field"><label>Volume do som: <span id="sv">100</span>%</label><input type="range" name="volume" min="10" max="200" value="100"/></div>
+        <div class="hint">Fica salvo no servidor ${esc(svName)}: todo mundo de lá vê e pode tocar. ${(file.size / 1024).toFixed(0)} KB</div>
       </form>
-      <div class="modal-foot"><button class="btn ghost" data-act="close">Cancelar</button><button class="btn primary" id="snd-save">${icon('upload', 'sm')} Enviar</button></div>`);
-    const f = $('#snd-form');
-    $$('label.btn', f).forEach((l) =>
-      l.addEventListener('click', () => {
-        $$('label.btn', f).forEach((x) => (x.style.background = ''));
-        l.style.background = 'var(--bg4)';
-      })
+      <div class="modal-foot"><button class="btn ghost" data-act="close">Cancelar</button><button class="btn primary" id="snd-save">${icon('upload', 'sm')} Enviar</button></div>`,
+      { wide: true }
     );
-    $$('label.btn', f)[0].style.background = 'var(--bg4)';
+    const f = $('#snd-form');
+    trim.bind(m);
+    const setImg = (v) => {
+      img = v;
+      $('#snd-cover').innerHTML = soundIcon({ img });
+    };
+    $('#snd-img').addEventListener('click', () => {
+      const i2 = document.createElement('input');
+      i2.type = 'file';
+      i2.accept = 'image/*';
+      i2.onchange = async () => i2.files[0] && setImg(await squareThumb(i2.files[0]).catch(() => img));
+      i2.click();
+    });
+    $('#snd-img-x').addEventListener('click', () => setImg(null));
     f.volume.addEventListener('input', () => ($('#sv').textContent = f.volume.value));
     $('#snd-save').addEventListener('click', async (e) => {
       const d = Object.fromEntries(new FormData(f));
       if (!d.name.trim()) return;
+      const t = trim.get();
       e.target.disabled = true;
       e.target.textContent = 'Enviando...';
       try {
-        await B.uploadSound({ uid: st.user.uid, name: d.name.trim(), emoji: d.emoji, dataUrl, volume: +d.volume });
+        await B.uploadSound({
+          uid: st.user.uid,
+          name: d.name.trim(),
+          emoji: '🔊',
+          dataUrl,
+          volume: +d.volume,
+          serverId: sv,
+          img,
+          start: t.full ? 0 : t.start,
+          end: t.full ? null : t.end,
+        });
+        out.stopSounds();
         closeModal();
         toast('Som adicionado!');
       } catch (err) {
@@ -899,6 +1102,32 @@ function openUploadSound() {
   input.click();
 }
 
+async function openTrimSound(id) {
+  const snd = st.sounds.find((x) => x.id === id);
+  if (!snd) return;
+  let buf;
+  try {
+    buf = await loadSound(id);
+  } catch (_) {
+    return toast('Não consegui abrir esse som.', true);
+  }
+  const trim = trimControls(buf, snd.start || 0, snd.end || buf.duration);
+  const m = openModal(
+    `<div class="modal-head"><h3>Cortar "${esc(snd.name)}"</h3><button class="ibtn" data-act="close">${icon('close')}</button></div>
+     <div class="modal-body">${trim.html}</div>
+     <div class="modal-foot"><button class="btn ghost" data-act="close">Cancelar</button><button class="btn primary" id="trim-save">Salvar corte</button></div>`,
+    { wide: true }
+  );
+  trim.bind(m);
+  $('#trim-save').addEventListener('click', async () => {
+    const t = trim.get();
+    await B.updateSound(id, { start: t.full ? 0 : t.start, end: t.full ? null : t.end }).catch((e) => toast(B.friendlyError(e), true));
+    out.stopSounds();
+    closeModal();
+    toast('Corte salvo!');
+  });
+}
+
 // ---------------------------------------------------------------- renderização
 function renderMain() {
   if (!st.me) return;
@@ -909,6 +1138,7 @@ function renderMain() {
     <main class="main">
       <div id="update-slot"></div>
       <div class="main-head" id="main-head"></div>
+      <div id="botbar"></div>
       <div class="body">
         <div class="stage"><div id="stage" style="flex:1;display:flex;flex-direction:column;min-height:0"></div><div class="controls" id="controls"></div></div>
         <div class="soundboard" id="soundboard" style="${st.showSB ? '' : 'display:none'}"></div>
@@ -924,6 +1154,7 @@ function renderMain() {
   renderStage();
   renderControls();
   renderSoundboard();
+  renderBotBar();
   renderUpdate();
 }
 
@@ -999,8 +1230,8 @@ function renderSidebar() {
       ${voiceRooms()
         .map((r) => {
           const ms = roomMembers(r.id);
-          return `<div class="room ${st.roomId === r.id && st.mode === 'stage' ? 'on' : ''} ${st.roomId === r.id ? 'joined' : ''}" data-act="join" data-room="${r.id}">${icon('voice', 'sm')}<span class="ellipsis">${esc(r.name)}</span>${ms.length ? `<span class="count">${ms.length}</span>` : ''}</div>
-          ${ms.length ? `<div class="room-members">${ms.map((p) => `<div class="rm" data-sid="${p.sid}">${avatar(p.name, p.color, p.sid, '', p.uid)}<span class="ellipsis">${esc(p.name)}</span>${flags(p)}</div>`).join('')}</div>` : ''}`;
+          return `<div class="room ${st.roomId === r.id && st.mode === 'stage' ? 'on' : ''} ${st.roomId === r.id ? 'joined' : ''}" data-act="join" data-room="${r.id}">${icon('voice', 'sm')}<span class="ellipsis">${esc(r.name)}</span>${ms.length ? `<span class="count">${ms.length}</span>` : ''}<button class="room-chat ${st.mode === 'chat' && currentText()?.id === r.id ? 'on' : ''}" data-act="open-text" data-room="${r.id}" title="Chat do canal ${esc(r.name)}">${icon('chat', 'sm')}</button></div>
+          ${ms.length ? `<div class="room-members">${ms.map((p) => `<div class="rm" data-sid="${p.sid}">${avatar(p.name, p.color, p.sid, '', p.uid)}<span class="ellipsis">${esc(p.name)}</span>${flags(p)}</div>`).join('')}${isBotActive(st.bot) && st.bot.roomId === r.id ? `<div class="rm bot-rm"><div class="avatar bot-av">${icon('music', 'sm')}</div><span class="ellipsis">Caçamba Bot</span><span class="bot-tag">BOT</span></div>` : ''}</div>` : ''}`;
         })
         .join('')}
     </div>
@@ -1049,7 +1280,8 @@ function renderHead() {
   }
   const ch = st.mode === 'chat' ? currentText() : null;
   if (ch) {
-    el.innerHTML = `${icon('hash')}<h2>${esc(ch.name)}</h2><span class="muted" style="font-size:12px">${ch.fixed ? 'Canal geral do servidor' : 'Canal de texto'}</span><div class="grow"></div>
+    el.innerHTML = `${icon(isText(ch) ? 'hash' : 'voice')}<h2>${esc(ch.name)}</h2><span class="muted" style="font-size:12px">${ch.fixed ? 'Canal geral do servidor' : isText(ch) ? 'Canal de texto' : 'Chat do canal de voz'}</span><div class="grow"></div>
+      <button class="btn ghost" data-act="music">${icon('music', 'sm')} Música</button>
       ${st.roomId ? `<button class="btn ghost" data-act="go-call">${icon('voice', 'sm')} Voltar pra chamada</button>` : ''}
       <button class="btn ghost" data-act="toggle-sb">${icon('sound', 'sm')} Soundboard</button>`;
     return;
@@ -1156,7 +1388,7 @@ const textRooms = () => st.rooms.filter(isText);
 const voiceRooms = () => st.rooms.filter((r) => !isText(r));
 function currentText() {
   const list = textRooms();
-  return list.find((r) => r.id === st.textId) || list.find((r) => r.fixed) || list[0] || null;
+  return st.rooms.find((r) => r.id === st.textId) || list.find((r) => r.fixed) || list[0] || null;
 }
 
 function stopChat() {
@@ -1181,8 +1413,11 @@ function renderChat(el) {
   if (box && box.dataset.ch === ch.id) return; // já está montado: não apaga o que a pessoa está digitando
   el.innerHTML = `<div class="chat" data-ch="${ch.id}">
     <div class="msgs" id="msgs"><div class="hint" style="padding:20px">Carregando...</div></div>
+    <div class="pending-files" id="pending-files"></div>
     <form class="composer" id="composer">
-      <textarea id="msg-input" rows="1" maxlength="2000" placeholder="Conversar em #${esc(ch.name)}"></textarea>
+      <button class="ibtn" type="button" data-act="attach" title="Anexar imagem ou arquivo">${icon('attach')}</button>
+      <textarea id="msg-input" rows="1" maxlength="2000" placeholder="Conversar em ${isText(ch) ? '#' : '🔊 '}${esc(ch.name)}  ·  /ajuda pros comandos do bot"></textarea>
+      <button class="ibtn" type="button" data-act="music" title="Bot de música">${icon('music')}</button>
       <button class="ibtn" type="submit" data-act="send-msg" title="Enviar (Enter)">${icon('send')}</button>
     </form>
   </div>`;
@@ -1198,6 +1433,28 @@ function renderChat(el) {
     ta.style.height = Math.min(ta.scrollHeight, 160) + 'px';
   });
   el.querySelector('#composer').addEventListener('submit', (e) => e.preventDefault());
+  ta.addEventListener('paste', (e) => {
+    const files = [...(e.clipboardData?.files || [])];
+    if (files.length) {
+      e.preventDefault();
+      addFiles(files);
+    }
+  });
+  const chatEl = el.querySelector('.chat');
+  chatEl.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    chatEl.classList.add('drop');
+  });
+  chatEl.addEventListener('dragleave', (e) => {
+    if (!chatEl.contains(e.relatedTarget)) chatEl.classList.remove('drop');
+  });
+  chatEl.addEventListener('drop', (e) => {
+    e.preventDefault();
+    chatEl.classList.remove('drop');
+    addFiles([...(e.dataTransfer?.files || [])]);
+  });
+  st.pendingFiles = [];
+  renderPending();
   renderMessages();
   setTimeout(() => ta.focus(), 0);
 }
@@ -1214,6 +1471,10 @@ const linkify = (text) =>
     const href = /^https?:\/\//i.test(u) ? u : 'https://' + u;
     return `<a href="#" data-act="open-link" data-url="${href}" title="${href}">${u}</a>${trail}`;
   });
+const richText = (text) =>
+  linkify(text)
+    .replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>')
+    .replace(/`([^`\n]+)`/g, '<code>$1</code>');
 const fmtTime = (t) => {
   const d = new Date(t);
   const now = new Date();
@@ -1236,21 +1497,36 @@ function renderMessages() {
   }
   let html = '';
   let prev = null;
-  for (const m of st.msgs) {
-    const grouped = prev && prev.uid === m.uid && m.time - prev.time < 5 * 60_000;
-    const mem = st.members.get(m.uid);
-    const name = mem?.name || m.name;
-    const color = mem?.color || m.color;
+  const eph = st.ephemeral.filter((e) => e.ch === ch.id);
+  const all = [...st.msgs, ...eph.map((e) => ({ ...e, eph: true, bot: true, id: '' }))].sort((a, b) => a.time - b.time);
+  for (const m of all) {
+    const who = m.bot ? 'bot' : m.uid;
+    const grouped = prev && prev.who === who && !m.eph && !prev.eph && m.time - prev.time < 5 * 60_000;
+    const mem = m.bot ? null : st.members.get(m.uid);
+    const name = m.bot ? 'Caçamba Bot' : mem?.name || m.name;
+    const color = m.bot ? '#ffb21e' : mem?.color || m.color;
+    const body = `${m.text ? `<div class="mtext">${richText(m.text)}</div>` : ''}${filesHtml(m)}${m.eph ? '<div class="eph-note">Só você vê isso</div>' : ''}`;
+    const av = m.bot ? `<div class="avatar bot-av">${icon('music', 'sm')}</div>` : avatar(name, color, '', '', m.uid);
+    const tag = m.bot ? '<span class="bot-tag">BOT</span>' : '';
     html += grouped
-      ? `<div class="msg cont" data-id="${m.id}" data-uid="${m.uid}"><span class="mt">${new Date(m.time).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</span><div class="mtext">${linkify(m.text)}</div></div>`
-      : `<div class="msg" data-id="${m.id}" data-uid="${m.uid}">${avatar(name, color, '', '', m.uid)}<div class="mbody"><div class="mhead"><b style="color:${esc(color || 'var(--text)')}">${esc(name)}</b><span class="mt">${fmtTime(m.time)}</span></div><div class="mtext">${linkify(m.text)}</div></div></div>`;
-    prev = m;
+      ? `<div class="msg cont" data-id="${m.id}" data-uid="${m.uid}"><span class="mt">${new Date(m.time).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</span>${body}</div>`
+      : `<div class="msg ${m.eph ? 'eph' : ''}" ${m.id ? `data-id="${m.id}"` : ''} data-uid="${m.uid || ''}">${av}<div class="mbody"><div class="mhead"><b style="color:${esc(color || 'var(--text)')}">${esc(name)}</b>${tag}<span class="mt">${fmtTime(m.time)}</span></div>${body}</div></div>`;
+    prev = { ...m, who };
   }
   box.innerHTML = html;
+  hydrateAttachments(box);
   if (nearBottom || box.dataset.first !== '1') {
     box.scrollTop = box.scrollHeight;
     box.dataset.first = '1';
   }
+}
+
+function addEph(chId, text) {
+  st.ephemeral.push({ ch: chId, text, time: Date.now(), uid: '' });
+  if (st.ephemeral.length > 30) st.ephemeral.shift();
+  renderMessages();
+  const box = $('#msgs');
+  if (box) box.scrollTop = box.scrollHeight;
 }
 
 async function sendChat() {
@@ -1258,18 +1534,299 @@ async function sendChat() {
   const ch = currentText();
   if (!ta || !ch) return;
   const text = ta.value.trim();
-  if (!text) return;
+  const files = st.pendingFiles.slice();
+  if (!text && !files.length) return;
+  if (files.some((f) => f.busy)) return toast('Espera o anexo terminar de preparar.');
+  const me = { uid: st.user.uid, name: st.me.name, color: st.me.color };
   ta.value = '';
   ta.style.height = 'auto';
+  const cmd = !files.length && parseCommand(text);
+  if (cmd) {
+    if (cmd.type !== 'help') B.sendMessage(ch.id, me, text).catch(() => {});
+    try {
+      await bot.command(cmd, { serverId: st.view, channel: ch, eph: (t) => addEph(ch.id, t) });
+    } catch (e) {
+      console.error(e);
+      addEph(ch.id, 'Deu ruim no comando: ' + (e.message || e));
+    }
+    return;
+  }
+  st.pendingFiles = [];
+  renderPending();
   try {
-    await B.sendMessage(ch.id, { uid: st.user.uid, name: st.me.name, color: st.me.color }, text);
+    const metas = [];
+    for (const f of files) {
+      const id = await B.uploadAttachment({ serverId: st.view, roomId: ch.id, uid: st.user.uid, name: f.name, type: f.type, size: f.size, data: f.data });
+      attCache.set(id, Promise.resolve({ data: f.data, name: f.name, type: f.type }));
+      metas.push({ id, name: f.name, type: f.type, size: f.size, w: f.w || 0, h: f.h || 0, img: !!f.isImg });
+    }
+    await B.sendMessage(ch.id, me, text, metas.length ? { files: metas } : {});
     const box = $('#msgs');
     if (box) box.scrollTop = box.scrollHeight;
   } catch (e) {
     console.error(e);
     ta.value = text;
+    st.pendingFiles = files;
+    renderPending();
     toast('Não consegui mandar a mensagem.', true);
   }
+}
+
+// ---------------------------------------------------------------- anexos
+const attCache = new Map(); // id -> Promise<{data,name,type}>
+const getAtt = (id) => {
+  if (!attCache.has(id)) {
+    const p = B.getAttachment(id);
+    p.catch(() => attCache.delete(id));
+    attCache.set(id, p);
+  }
+  return attCache.get(id);
+};
+const fmtSize = (n) => (n > 1024 * 1024 ? (n / 1024 / 1024).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB');
+
+function filesHtml(m) {
+  if (!m.files || !m.files.length) return '';
+  return `<div class="atts">${m.files
+    .map((f) =>
+      f.img
+        ? `<button class="att-img" data-act="att-view" data-id="${esc(f.id)}" style="aspect-ratio:${f.w && f.h ? `${f.w}/${f.h}` : '4/3'};width:${Math.min(400, f.w || 400)}px"><img data-att="${esc(f.id)}" alt="${esc(f.name)}"/></button>`
+        : `<div class="att-file">${icon('file')}<div class="grow"><b class="ellipsis">${esc(f.name)}</b><small>${fmtSize(f.size || 0)}</small></div><button class="ibtn" data-act="att-download" data-id="${esc(f.id)}" title="Baixar">${icon('download', 'sm')}</button></div>`
+    )
+    .join('')}</div>`;
+}
+
+function hydrateAttachments(box) {
+  $$('img[data-att]', box).forEach((img) => {
+    getAtt(img.dataset.att)
+      .then((a) => {
+        if (a && a.data) img.src = a.data;
+        else img.closest('.att-img')?.classList.add('gone');
+      })
+      .catch(() => img.closest('.att-img')?.classList.add('gone'));
+  });
+}
+
+async function downloadAtt(id) {
+  const a = await getAtt(id).catch(() => null);
+  if (!a || !a.data) return toast('Esse anexo não existe mais.', true);
+  const link = document.createElement('a');
+  link.href = a.data;
+  link.download = a.name || 'arquivo';
+  link.click();
+}
+
+async function viewAtt(id) {
+  const a = await getAtt(id).catch(() => null);
+  if (!a || !a.data) return;
+  openModal(
+    `<div class="lightbox"><img src="${a.data}" alt=""/><div class="row"><span class="muted ellipsis">${esc(a.name || '')}</span><div class="grow"></div><button class="btn" data-act="att-download" data-id="${esc(id)}">${icon('download', 'sm')} Baixar</button><button class="btn ghost" data-act="close">Fechar</button></div></div>`,
+    { raw: true }
+  );
+}
+
+const readAsDataURL = (file) =>
+  new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result);
+    r.onerror = rej;
+    r.readAsDataURL(file);
+  });
+const MAX_ATT = 700 * 1024;
+
+// imagem grande vira JPEG menor (até 1600 px); GIF pequeno vai como está (animado)
+async function prepareFile(file) {
+  const isImg = /^image\/(png|jpe?g|webp|gif|bmp)$/i.test(file.type);
+  if (isImg) {
+    if (/gif/i.test(file.type) && file.size <= MAX_ATT) {
+      const data = await readAsDataURL(file);
+      const dims = await new Promise((res) => {
+        const im = new Image();
+        im.onload = () => res([im.naturalWidth, im.naturalHeight]);
+        im.onerror = () => res([0, 0]);
+        im.src = data;
+      });
+      return { name: file.name, type: file.type, size: file.size, data, isImg: true, w: dims[0], h: dims[1] };
+    }
+    const url = URL.createObjectURL(file);
+    try {
+      const img = await new Promise((res, rej) => {
+        const im = new Image();
+        im.onload = () => res(im);
+        im.onerror = rej;
+        im.src = url;
+      });
+      for (const [max, q] of [[1600, 0.82], [1280, 0.72], [960, 0.65], [720, 0.6]]) {
+        const k = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+        const w = Math.round(img.naturalWidth * k);
+        const h = Math.round(img.naturalHeight * k);
+        const c = document.createElement('canvas');
+        c.width = w;
+        c.height = h;
+        const g = c.getContext('2d');
+        g.fillStyle = '#fff';
+        g.fillRect(0, 0, w, h);
+        g.drawImage(img, 0, 0, w, h);
+        const data = c.toDataURL('image/jpeg', q);
+        if (data.length * 0.75 <= MAX_ATT) return { name: file.name.replace(/\.[^.]+$/, '') + '.jpg', type: 'image/jpeg', size: Math.round(data.length * 0.75), data, isImg: true, w, h };
+      }
+      throw new Error('grande');
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+  if (file.size > MAX_ATT) throw Object.assign(new Error('grande'), { big: true });
+  return { name: file.name, type: file.type || 'application/octet-stream', size: file.size, data: await readAsDataURL(file), isImg: false };
+}
+
+async function addFiles(files) {
+  for (const file of files) {
+    if (st.pendingFiles.length >= 6) {
+      toast('Máximo de 6 anexos por mensagem.');
+      break;
+    }
+    const slot = { name: file.name, busy: true };
+    st.pendingFiles.push(slot);
+    renderPending();
+    try {
+      Object.assign(slot, await prepareFile(file), { busy: false });
+    } catch (e) {
+      st.pendingFiles = st.pendingFiles.filter((x) => x !== slot);
+      toast(e.big ? `"${file.name}" é grande demais (máx. 700 KB pra arquivos; imagens são diminuídas sozinhas).` : `Não consegui anexar "${file.name}".`, true);
+    }
+    renderPending();
+  }
+  $('#msg-input')?.focus();
+}
+
+function renderPending() {
+  const el = $('#pending-files');
+  if (!el) return;
+  el.innerHTML = st.pendingFiles
+    .map(
+      (f, i) =>
+        `<div class="pf">${f.busy ? '<span class="pf-spin"></span>' : f.isImg ? `<img src="${f.data}" alt=""/>` : icon('file')}<span class="ellipsis">${esc(f.name)}</span><button class="ibtn" data-act="unattach" data-i="${i}" title="Tirar">${icon('close', 'sm')}</button></div>`
+    )
+    .join('');
+}
+
+function pickAttachments() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.multiple = true;
+  input.onchange = () => addFiles([...input.files]);
+  input.click();
+}
+
+// ---------------------------------------------------------------- bot de música (tela)
+const botHere = () => (st.view !== 'home' && st.botServer === st.view && isBotActive(st.bot) ? st.bot : null);
+const botPos = (b) => Math.max(0, ((b.paused ? b.pausedAt : Date.now()) - b.startedAt) / 1000);
+
+function renderBotBar() {
+  const el = $('#botbar');
+  if (!el) return;
+  const b = botHere();
+  if (!b || !b.now) {
+    el.className = '';
+    el.innerHTML = '';
+    return;
+  }
+  const room = st.rooms.find((r) => r.id === b.roomId);
+  el.className = 'botbar';
+  el.innerHTML = `<img src="${esc(b.now.thumb)}" alt=""/>
+    <div class="bb-info"><b class="ellipsis">${esc(b.now.title)}</b>
+      <small>🔊 ${esc(room ? room.name : '')} · ${b.ad ? 'anúncio do YouTube...' : `<span id="bb-pos">${fmtDur(botPos(b))}</span> / ${fmtDur(b.now.duration)}`} · ${b.queue.length} na fila${b.paused ? ' · pausado' : ''}</small>
+      <div class="bb-prog"><i id="bb-fill"></i></div></div>
+    <button class="ibtn" data-act="bot-ctl" data-c="${b.paused ? 'resume' : 'pause'}" title="${b.paused ? 'Continuar' : 'Pausar'}">${icon(b.paused ? 'play' : 'pause')}</button>
+    <button class="ibtn" data-act="bot-ctl" data-c="skip" title="Pular">${icon('skip')}</button>
+    <button class="ibtn" data-act="bot-ctl" data-c="stop" title="Parar e tirar o bot">${icon('stop')}</button>
+    <button class="btn ghost" data-act="music">Fila</button>`;
+  tickBotBar();
+}
+function tickBotBar() {
+  const b = botHere();
+  if (!b || !b.now) return;
+  const pos = botPos(b);
+  const p = $('#bb-pos');
+  if (p) p.textContent = fmtDur(pos);
+  const f = $('#bb-fill');
+  if (f) f.style.width = b.now.duration ? Math.min(100, (pos / b.now.duration) * 100) + '%' : '0';
+  const mp = $('#mus-pos');
+  if (mp) mp.textContent = fmtDur(pos);
+}
+setInterval(tickBotBar, 1000);
+
+function botCmd(cmd) {
+  const ch = st.mode === 'chat' ? currentText() : null;
+  return bot.command(cmd, { serverId: st.view, channel: ch, eph: (t) => (ch ? addEph(ch.id, t) : toast(t.replace(/[*`]/g, ''))) }).catch((e) => toast('Erro: ' + e.message, true));
+}
+
+function openMusicModal() {
+  if (st.view === 'home') return toast('Abre um servidor pra usar o bot.');
+  openModal(
+    `<div class="modal-head"><h3>${icon('music')} Bot de música</h3><button class="ibtn" data-act="close">${icon('close')}</button></div>
+     <div class="modal-body music">
+       <form id="mus-search" class="row"><input type="text" name="q" placeholder="Nome da música ou link do YouTube" autocomplete="off"/><button class="btn primary" type="submit">Buscar</button></form>
+       <div id="mus-results"></div>
+       <div id="mus-now"></div>
+       <div class="row" style="margin-top:12px"><span class="muted" style="font-size:12px;white-space:nowrap">Volume da música pra mim</span><input type="range" min="0" max="150" value="${S.botVolume ?? 70}" data-botvol style="flex:1"/></div>
+       <div class="hint">Também dá pra digitar no chat: <b>/play nome</b>, <b>/pular</b>, <b>/pausar</b>, <b>/parar</b>, <b>/fila</b> (/ajuda mostra todos). O bot entra no canal de voz de quem pediu.</div>
+     </div>`,
+    { wide: true }
+  );
+  const f = $('#mus-search');
+  f.q.focus();
+  f.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const q = f.q.value.trim();
+    if (!q) return;
+    $('#mus-results').innerHTML = '<div class="hint" style="padding:10px">Procurando no YouTube...</div>';
+    try {
+      st.musResults = await bridge.bot.search(q, 8);
+    } catch (err) {
+      console.error(err);
+      st.musResults = [];
+      $('#mus-results').innerHTML = '<div class="hint" style="padding:10px">A busca falhou. Tenta de novo.</div>';
+      return;
+    }
+    $('#mus-results').innerHTML = st.musResults.length
+      ? st.musResults
+          .map(
+            (r, i) => `<div class="mus-item"><img src="${esc(r.thumb)}" alt=""/><div class="grow"><b class="ellipsis">${esc(r.title)}</b><small class="muted">${esc(r.author)} · ${fmtDur(r.duration)}</small></div>
+          <button class="btn" data-act="mus-play" data-i="${i}">${icon('play', 'sm')} Tocar</button><button class="btn ghost" data-act="mus-next" data-i="${i}" title="Tocar logo depois da atual">Próxima</button></div>`
+          )
+          .join('')
+      : '<div class="hint" style="padding:10px">Nada encontrado.</div>';
+  });
+  updateMusicModal();
+}
+
+function updateMusicModal() {
+  const el = $('#mus-now');
+  if (!el) return;
+  const b = botHere();
+  if (!b || !b.now) {
+    el.innerHTML = `<div class="hint" style="padding:10px 0">O bot não tá tocando agora. Busca uma música aí em cima: ele entra no seu canal de voz${st.roomId && st.roomServerId === st.view ? '' : ' (entra num canal de voz antes)'}.</div>`;
+    return;
+  }
+  el.innerHTML = `
+    <div class="label">Tocando agora</div>
+    <div class="mus-item now"><img src="${esc(b.now.thumb)}" alt=""/><div class="grow"><b class="ellipsis">${esc(b.now.title)}</b><small class="muted"><span id="mus-pos">${fmtDur(botPos(b))}</span> / ${fmtDur(b.now.duration)} · ${b.now.by === 'autoplay' ? 'autoplay' : 'pedido por ' + esc(b.now.by)}</small></div>
+      <button class="ibtn" data-act="bot-ctl" data-c="${b.paused ? 'resume' : 'pause'}">${icon(b.paused ? 'play' : 'pause')}</button>
+      <button class="ibtn" data-act="bot-ctl" data-c="skip" title="Pular">${icon('skip')}</button>
+      <button class="ibtn" data-act="bot-ctl" data-c="stop" title="Parar e tirar o bot">${icon('stop')}</button></div>
+    <div class="row" style="margin:8px 0">
+      <div class="label" style="margin:0">Fila (${b.queue.length})</div><div class="grow"></div>
+      <button class="btn ghost ${b.autoplay ? 'on' : ''}" data-act="bot-ctl" data-c="autoplay" title="Tocar músicas parecidas quando a fila acabar">${icon('repeat', 'sm')} Autoplay ${b.autoplay ? 'ligado' : 'desligado'}</button>
+      <button class="btn ghost" data-act="bot-ctl" data-c="shuffle">${icon('shuffle', 'sm')} Embaralhar</button>
+      <button class="btn ghost" data-act="bot-ctl" data-c="clear">Limpar</button>
+    </div>
+    <div class="mus-queue">${
+      b.queue
+        .map(
+          (q, i) => `<div class="mus-item small"><span class="qn">${i + 1}</span><img src="${esc(q.thumb)}" alt=""/><div class="grow"><b class="ellipsis">${esc(q.title)}</b><small class="muted">${fmtDur(q.duration)} · ${esc(q.by)}</small></div><button class="ibtn" data-act="bot-ctl" data-c="remove" data-arg="${i + 1}" title="Tirar da fila">${icon('close', 'sm')}</button></div>`
+        )
+        .join('') || '<div class="hint">Fila vazia.' + (b.autoplay ? ' Quando acabar, o autoplay escolhe músicas parecidas.' : '') + '</div>'
+    }</div>`;
 }
 
 function msgMenu(e, id) {
@@ -1404,12 +1961,14 @@ function renderSoundboard() {
     <div class="sb-head">${icon('sound')}<b>Soundboard</b><button class="ibtn" data-act="toggle-sb" title="Fechar">${icon('close', 'sm')}</button></div>
     <div class="sb-grid">
       ${
-        st.sounds
-          .map(
-            (s) =>
-              `<button class="sound" data-act="sound" data-id="${s.id}" title="${esc(s.name)} — clique direito para opções"><span class="em">${esc(s.emoji || '🔊')}</span><span class="nm">${esc(s.name)}</span></button>`
-          )
-          .join('') || `<div class="sb-empty">Nenhum som ainda.<br/>Sobe o primeiro aí embaixo!</div>`
+        !sbServer()
+          ? `<div class="sb-empty">Abre um servidor pra ver os sons dele.</div>`
+          : visibleSounds()
+              .map(
+                (s) =>
+                  `<button class="sound" data-act="sound" data-id="${s.id}" title="${esc(s.name)}: botão direito pra opções"><span class="em">${soundIcon(s)}</span><span class="nm">${esc(s.name)}</span></button>`
+              )
+              .join('') || `<div class="sb-empty">Nenhum som neste servidor ainda.<br/>Sobe o primeiro aí embaixo!</div>`
       }
     </div>
     <div class="sb-foot">
@@ -2034,11 +2593,13 @@ function soundMenu(e, id) {
   const c = openCtx(
     e.clientX,
     e.clientY,
-    `<div class="ctx-title">${esc(s.emoji)} ${esc(s.name)}</div>
+    `<div class="ctx-title">${esc(s.name)}</div>
      <div class="ctx-range"><small><span>Volume do som</span><span id="sv2">${s.volume ?? 100}%</span></small>
      <input type="range" min="10" max="200" value="${s.volume ?? 100}" id="sv-range"/></div>
      <button class="item" data-x="preview">Ouvir só eu</button>
      <button class="item" data-x="rename">Renomear</button>
+     <button class="item" data-x="img">Trocar imagem</button>${s.img ? '<button class="item" data-x="img-x">Tirar imagem</button>' : ''}
+     <button class="item" data-x="trim">Cortar áudio</button>
      <button class="item danger" data-x="delete">Excluir som</button>
      <div class="hint" style="padding:4px 10px">Enviado por ${esc(owner ? owner.name : '?')}</div>`
   );
@@ -2050,6 +2611,9 @@ function soundMenu(e, id) {
     closeCtx();
     if (x === 'preview') playSound(id);
     if (x === 'rename') promptText('Renomear som', s.name, (v) => B.updateSound(id, { name: v.slice(0, 40) }));
+    if (x === 'img') pickImage(128, (data) => B.updateSound(id, { img: data }).then(() => toast('Imagem do som trocada!')), { title: 'Imagem do som' });
+    if (x === 'img-x') B.updateSound(id, { img: null });
+    if (x === 'trim') openTrimSound(id);
     if (x === 'delete') confirmBox(`Excluir o som "${s.name}" pra todo mundo?`, () => B.deleteSound(id));
   });
 }
@@ -2142,6 +2706,31 @@ document.addEventListener('click', async (e) => {
       break;
     case 'send-msg':
       sendChat();
+      break;
+    case 'attach':
+      pickAttachments();
+      break;
+    case 'unattach':
+      st.pendingFiles.splice(+b.dataset.i, 1);
+      renderPending();
+      break;
+    case 'att-view':
+      viewAtt(b.dataset.id);
+      break;
+    case 'att-download':
+      downloadAtt(b.dataset.id);
+      break;
+    case 'music':
+      openMusicModal();
+      break;
+    case 'mus-play':
+    case 'mus-next': {
+      const r = st.musResults[+b.dataset.i];
+      if (r) botCmd({ type: a === 'mus-next' ? 'next' : 'play', item: r }).then(() => toast(`Pedido: ${r.title}`));
+      break;
+    }
+    case 'bot-ctl':
+      botCmd({ type: b.dataset.c, arg: b.dataset.arg || '' });
       break;
     case 'open-link':
       bridge.openExternal(b.dataset.url);
@@ -2410,6 +2999,14 @@ document.addEventListener('input', (e) => {
     S.sfxVolume = +t.value;
     saveSettings();
     out.setSfxVolume(S.sfxVolume);
+  }
+});
+
+document.addEventListener('input', (e) => {
+  if (e.target.matches && e.target.matches('[data-botvol]')) {
+    S.botVolume = +e.target.value;
+    saveSettings();
+    bot.setListenVolume(S.botVolume);
   }
 });
 
