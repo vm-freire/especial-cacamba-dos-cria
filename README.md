@@ -78,8 +78,12 @@ O tom ajusta sozinho pro tom de quem fala. *Atualizar vozes* busca as novas sem 
 3. *+ Nova voz* → nome, foto (opcional), modelo `.onnx` (ou `.pth`, se o conversor w-okada estiver em `~/VoiceChanger`),
    tom → *Gravar 6 s* pra ouvir como fica → *Publicar no Caçamba*.
 
-Treinar um modelo RVC: use um Colab de RVC v2 (ex.: Applio ou RVC WebUI) com ~10 min de áudio limpo da voz,
-e exporte o `.pth` (ou o `.onnx`). Modelos de terceiros em `.pth` podem conter código: use só os que você treinou.
+**Treinar uma voz nova (de um MP3, vídeo etc.):**
+[![Abrir no Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vm-freire/especial-cacamba-dos-cria/blob/main/colab/treinar-voz.ipynb)
+
+Abra o link (com uma conta Google), escolha GPU T4 e rode os passos de cima pra baixo: manda os áudios
+(10–30 min de fala é o ideal), separa a voz da música se precisar, treina (30 min a 2 h) e baixa o `.pth`.
+Depois é só *Carregar modelo* no Estúdio. Modelos de terceiros em `.pth` podem conter código: use só os que você treinou.
 
 **Como a publicação funciona:** o Estúdio manda o modelo em pedaços de 4 MB para `site/api/vozes.js` (Vercel), que confere a
 senha e sobe no release `vozes` do GitHub. Nenhuma chave fica no Estúdio. Configure uma vez na Vercel
