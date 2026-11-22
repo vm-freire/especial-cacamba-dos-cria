@@ -163,7 +163,24 @@ export class MicPipeline {
         this.filter = null;
       }
     }
+    // volume da voz escolhida (cada filtro guarda o seu)
+    if (this.filter) {
+      this.fxGain = this.ctx.createGain();
+      this.fxGain.gain.value = this.fxVolume() / 100;
+      node.connect(this.fxGain);
+      node = this.fxGain;
+      this.filter.nodes.push(this.fxGain);
+    } else this.fxGain = null;
     node.connect(this.inGain);
+  }
+
+  fxVolume() {
+    const v = (this.settings.vozVolume || {})[this.settings.voiceFilter || ''];
+    return Number.isFinite(v) ? v : 100;
+  }
+
+  setFxVolume(v) {
+    if (this.fxGain) this.fxGain.gain.setTargetAtTime(v / 100, this.ctx.currentTime, 0.02);
   }
 
   dropNodes() {

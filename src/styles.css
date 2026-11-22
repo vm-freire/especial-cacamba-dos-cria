@@ -564,6 +564,11 @@ body.fs #fs-btn { display: none; }
 .vcard { display: flex; flex-direction: column; gap: 6px; padding: 8px; border-radius: 12px; background: var(--bg2); border: 2px solid transparent; text-align: left; min-width: 0; }
 .vcard:hover { background: var(--bg3); }
 .vcard.on { border-color: #ffb21e; background: rgba(255,178,30,.08); }
+.vcard-wrap { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.vcard-wrap > .vcard { width: 100%; }
+.vc-vol { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 10px; background: var(--bg2); color: var(--muted); font-size: 11px; }
+.vc-vol input { flex: 1; min-width: 0; accent-color: #ffb21e; }
+.vc-vol b { width: 34px; text-align: right; color: var(--text, #eee); font-weight: 600; }
 .vc-pic { position: relative; aspect-ratio: 1; border-radius: 9px; overflow: hidden; background: var(--bg3); }
 .vc-pic img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .vc-generic { width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 10px; box-sizing: border-box;

@@ -45,6 +45,7 @@ const DEFAULTS = {
   gateEnabled: false,
   aiNoise: true,
   voiceFilter: '', // '' = voz normal, 'autotune', 'ai:<id>' (voz com IA)
+  vozVolume: {}, // volume de saída por filtro de voz, em % (100 = normal)
   vozF0: 0, // tom médio da sua voz (aprendido sozinho pelas vozes com IA)
   settingsVersion: 4,
   gateThreshold: -50,
@@ -2994,9 +2995,13 @@ function voiceCard(f) {
   else if (f.loading) over = `<div class="vc-over"><small>Carregando…</small></div>`;
   else if (f.download) over = `<div class="vc-over dl">${icon('download')}<small>Baixar · ${f.download}</small></div>`;
   const del = f.removable ? `<span class="vc-del" data-act="voz-apagar" data-id="${esc(f.vid)}" title="Apagar do PC">${icon('close', 'sm')}</span>` : '';
-  return `<button class="vcard ${on ? 'on' : ''}" data-act="${f.act || 'pick-voice'}" data-id="${esc(f.act ? f.vid : f.id)}" title="${esc(f.name)}">
+  const card = `<button class="vcard ${on ? 'on' : ''}" data-act="${f.act || 'pick-voice'}" data-id="${esc(f.act ? f.vid : f.id)}" title="${esc(f.name)}">
     <div class="vc-pic">${pic}${badge}${over}${del}</div>
     <span class="vc-name ellipsis">${esc(f.name)}</span>${f.desc ? `<small class="ellipsis">${esc(f.desc)}</small>` : ''}</button>`;
+  // voz ligada (menos a normal): controle de volume embaixo do cartão
+  if (!on || !f.id || f.act) return card;
+  const vol = (S.vozVolume || {})[f.id] ?? 100;
+  return `<div class="vcard-wrap">${card}<label class="vc-vol" title="Volume dessa voz">${icon('sound', 'sm')}<input type="range" min="0" max="150" step="5" value="${vol}" data-voz-vol="${esc(f.id)}"/><b>${vol}%</b></label></div>`;
 }
 function aiCards() {
   if (!vz.catalogo || !vz.estado) return [];
@@ -3037,6 +3042,18 @@ function renderVoices(el) {
     ${aiBody}
     <div class="hint" style="margin-top:12px">Use fone pra se ouvir sem microfonia. A voz escolhida fica salva até você trocar.</div>
   </div>`;
+  el.querySelectorAll('[data-voz-vol]').forEach((r) => {
+    r.addEventListener('input', () => {
+      const v = +r.value;
+      S.vozVolume = { ...(S.vozVolume || {}), [r.dataset.vozVol]: v };
+      r.nextElementSibling.textContent = v + '%';
+      if (mic) {
+        mic.settings.vozVolume = S.vozVolume;
+        mic.setFxVolume(v);
+      }
+    });
+    r.addEventListener('change', () => saveSettings());
+  });
   const qi = $('#voice-q', el);
   qi.addEventListener('input', () => {
     st.voiceQuery = qi.value;
