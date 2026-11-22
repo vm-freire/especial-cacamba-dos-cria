@@ -186,14 +186,102 @@ async function botLogado() {
   const c = await botSession().cookies.get({ domain: 'youtube.com' }).catch(() => []);
   return c.some((x) => x.name === 'LOGIN_INFO' || x.name === 'SAPISID' || x.name === '__Secure-3PAPISID');
 }
+// Login: o Google recusa login dentro de apps, então abre o Chrome/Edge de verdade com um perfil SEPARADO
+// (não mexe no navegador normal da pessoa). Depois do login, lê só os cookies do Google/YouTube
+// pela porta de depuração local, copia pro bot e fecha essa janela. A senha nunca passa pelo app.
+const LOGIN_URL = 'https://accounts.google.com/ServiceLogin?service=youtube&passive=true&continue=' + encodeURIComponent('https://www.youtube.com/signin?action_handle_signin=true&next=%2F');
+function acharNavegador() {
+  const env = process.env;
+  const lista = [
+    path.join(env['ProgramFiles'] || 'C:\\Program Files', 'Google\\Chrome\\Application\\chrome.exe'),
+    path.join(env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Google\\Chrome\\Application\\chrome.exe'),
+    path.join(env['LOCALAPPDATA'] || '', 'Google\\Chrome\\Application\\chrome.exe'),
+    path.join(env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Microsoft\\Edge\\Application\\msedge.exe'),
+    path.join(env['ProgramFiles'] || 'C:\\Program Files', 'Microsoft\\Edge\\Application\\msedge.exe'),
+  ];
+  return lista.find((p) => p && fs.existsSync(p)) || null;
+}
+// conversa com o navegador pelo protocolo de depuração (só na máquina, 127.0.0.1)
+function cdp(wsUrl, method, params = {}) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(wsUrl);
+    const t = setTimeout(() => { try { ws.close(); } catch (_) {} reject(new Error('timeout')); }, 8000);
+    ws.onopen = () => ws.send(JSON.stringify({ id: 1, method, params }));
+    ws.onmessage = (ev) => {
+      const m = JSON.parse(String(ev.data));
+      if (m.id !== 1) return;
+      clearTimeout(t);
+      try { ws.close(); } catch (_) {}
+      m.error ? reject(new Error(m.error.message)) : resolve(m.result);
+    };
+    ws.onerror = () => { clearTimeout(t); reject(new Error('ws')); };
+  });
+}
+const COOKIE_YT = (c) => /(^|\.)(youtube\.com|google\.com)$/.test(c.domain.replace(/^\./, ''));
+async function importarCookies(lista) {
+  const ses = botSession();
+  const same = { Strict: 'strict', Lax: 'lax', None: 'no_restriction' };
+  for (const c of lista.filter(COOKIE_YT)) {
+    const host = c.domain.replace(/^\./, '');
+    const ck = { url: `https://${host}${c.path || '/'}`, name: c.name, value: c.value, path: c.path || '/', secure: !!c.secure, httpOnly: !!c.httpOnly, sameSite: same[c.sameSite] || 'unspecified' };
+    if (!c.name.startsWith('__Host-') && c.domain.startsWith('.')) ck.domain = c.domain;
+    if (!c.session && c.expires > 0) ck.expirationDate = c.expires;
+    await ses.cookies.set(ck).catch((e) => console.warn('cookie', c.name, e.message));
+  }
+  await ses.cookies.flushStore().catch(() => {});
+}
+let loginProc = null;
+function loginExterno(exe) {
+  const dir = path.join(app.getPath('userData'), 'yt-login');
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+  const { spawn } = require('child_process');
+  const proc = spawn(exe, [`--user-data-dir=${dir}`, '--remote-debugging-port=0', '--remote-allow-origins=*', '--no-first-run', '--no-default-browser-check', '--disable-sync', '--new-window', LOGIN_URL], { windowsHide: false, detached: false, stdio: 'ignore' });
+  loginProc = proc;
+  return new Promise((resolve) => {
+    let fim = false;
+    let saiu = false;
+    proc.on('exit', () => (saiu = true));
+    const acabar = async (ok) => {
+      if (fim) return;
+      fim = true;
+      clearInterval(timer);
+      loginProc = null;
+      try { process.kill(proc.pid); } catch (_) {}
+      setTimeout(() => fs.rmSync(dir, { recursive: true, force: true }), 3000); // apaga o perfil temporário
+      botRecarregar = true;
+      if (win && !win.isDestroyed()) win.focus();
+      resolve(ok || (await botLogado()));
+    };
+    const inicio = Date.now();
+    const timer = setInterval(async () => {
+      if (Date.now() - inicio > 10 * 60_000) return acabar(false);
+      try {
+        const porta = fs.readFileSync(path.join(dir, 'DevToolsActivePort'), 'utf8').split(/\r?\n/)[0].trim();
+        const ver = await (await fetch(`http://127.0.0.1:${porta}/json/version`)).json();
+        const { cookies } = await cdp(ver.webSocketDebuggerUrl, 'Storage.getCookies');
+        if (cookies.some((c) => /youtube\.com$/.test(c.domain) && (c.name === 'LOGIN_INFO' || c.name === 'SAPISID' || c.name === '__Secure-3PAPISID'))) {
+          await importarCookies(cookies);
+          await cdp(ver.webSocketDebuggerUrl, 'Browser.close').catch(() => {});
+          return acabar(true);
+        }
+      } catch (_) {
+        if (saiu) return acabar(false); // fechou a janela sem logar
+      }
+    }, 2000);
+  });
+}
 let loginWin = null;
 ipcMain.handle('bot:conta', () => botLogado());
 ipcMain.handle('bot:login', () => {
-  if (loginWin && !loginWin.isDestroyed()) {
-    loginWin.focus();
+  if (loginProc || (loginWin && !loginWin.isDestroyed())) {
+    if (loginWin && !loginWin.isDestroyed()) loginWin.focus();
     return null;
   }
   botSession();
+  const exe = acharNavegador();
+  if (exe) return loginExterno(exe);
+  // sem Chrome/Edge: tenta dentro do app
   return new Promise((resolve) => {
     loginWin = new BrowserWindow({
       parent: win || undefined,
@@ -210,7 +298,6 @@ ipcMain.handle('bot:login', () => {
       if (/^https:\/\//.test(url)) w.loadURL(url).catch(() => {});
       return { action: 'deny' };
     });
-    // voltou pro YouTube já logado: fecha sozinho
     w.webContents.on('did-navigate', async (_e, url) => {
       if (/^https:\/\/(www|m)\.youtube\.com\//.test(url) && (await botLogado()) && !w.isDestroyed()) w.close();
     });
@@ -219,7 +306,7 @@ ipcMain.handle('bot:login', () => {
       botRecarregar = true;
       resolve(await botLogado());
     });
-    w.loadURL('https://accounts.google.com/ServiceLogin?service=youtube&passive=true&continue=' + encodeURIComponent('https://www.youtube.com/signin?action_handle_signin=true&next=%2F')).catch(() => {});
+    w.loadURL(LOGIN_URL).catch(() => {});
   });
 });
 ipcMain.handle('bot:sair', async () => {

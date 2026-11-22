@@ -1,7 +1,7 @@
 {
   "name": "especial-cacamba-dos-cria",
   "productName": "Especial Caçamba dos Cria",
-  "version": "1.0.20",
+  "version": "1.0.21",
   "description": "Chamada de voz, compartilhamento de tela e soundboard só para os cria.",
   "main": "main.js",
   "author": "Vitor Freire",

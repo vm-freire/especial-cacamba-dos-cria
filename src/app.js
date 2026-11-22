@@ -3412,7 +3412,7 @@ document.addEventListener('click', async (e) => {
       break;
     case 'yt-login': {
       b.disabled = true;
-      toast('Entre com a sua conta na janela do Google que abriu.');
+      toast('Abriu uma janela do Chrome: entre com a sua conta do YouTube lá. Ela fecha sozinha quando terminar.');
       const ok = await bridge.bot.login();
       if (ok === null) break;
       renderMusConta(ok);
