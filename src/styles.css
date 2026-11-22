@@ -603,3 +603,10 @@ body.fs #fs-btn { display: none; }
 .call-tempo { margin-left: auto; font-size: 11px; color: var(--muted, #9aa); white-space: nowrap; }
 .room .call-tempo + .count { margin-left: 6px; }
 .conn .call-tempo { margin: 0; color: inherit; font-size: inherit; }
+
+/* conta do YouTube no bot */
+.mus-conta { display: flex; align-items: center; gap: 10px; padding: 10px 12px; margin-bottom: 10px; border-radius: 10px; background: var(--bg2); }
+.mus-conta:empty { display: none; }
+.mus-conta b { display: block; font-size: 13px; }
+.mus-conta small { font-size: 12px; }
+.mus-conta .ok { color: #3ba55d; font-weight: 700; font-size: 18px; }

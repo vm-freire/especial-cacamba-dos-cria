@@ -169,8 +169,68 @@ let botWin = null;
 let ytsearch = null;
 const yts = () => (ytsearch = ytsearch || require('./dist/ytsearch.cjs'));
 
+// Conta do YouTube do bot: o login fica salvo só neste PC (partição persist:musicbot).
+// Com Premium, o que o bot toca por este PC vem sem anúncio. A senha é digitada na página do Google; o app não vê.
+const UA_CHROME = () => `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${process.versions.chrome} Safari/537.36`;
+let botSesPronta = false;
+function botSession() {
+  const ses = session.fromPartition('persist:musicbot');
+  if (!botSesPronta) {
+    ses.setUserAgent(UA_CHROME()); // o Google recusa login em navegador "Electron"
+    botSesPronta = true;
+  }
+  return ses;
+}
+let botRecarregar = false; // depois de entrar/sair, a próxima música abre a página do zero (com a conta nova)
+async function botLogado() {
+  const c = await botSession().cookies.get({ domain: 'youtube.com' }).catch(() => []);
+  return c.some((x) => x.name === 'LOGIN_INFO' || x.name === 'SAPISID' || x.name === '__Secure-3PAPISID');
+}
+let loginWin = null;
+ipcMain.handle('bot:conta', () => botLogado());
+ipcMain.handle('bot:login', () => {
+  if (loginWin && !loginWin.isDestroyed()) {
+    loginWin.focus();
+    return null;
+  }
+  botSession();
+  return new Promise((resolve) => {
+    loginWin = new BrowserWindow({
+      parent: win || undefined,
+      width: 480,
+      height: 720,
+      title: 'Entrar no YouTube',
+      autoHideMenuBar: true,
+      backgroundColor: '#ffffff',
+      webPreferences: { partition: 'persist:musicbot', contextIsolation: true, sandbox: true },
+    });
+    const w = loginWin;
+    w.webContents.setUserAgent(UA_CHROME());
+    w.webContents.setWindowOpenHandler(({ url }) => {
+      if (/^https:\/\//.test(url)) w.loadURL(url).catch(() => {});
+      return { action: 'deny' };
+    });
+    // voltou pro YouTube já logado: fecha sozinho
+    w.webContents.on('did-navigate', async (_e, url) => {
+      if (/^https:\/\/(www|m)\.youtube\.com\//.test(url) && (await botLogado()) && !w.isDestroyed()) w.close();
+    });
+    w.on('closed', async () => {
+      loginWin = null;
+      botRecarregar = true;
+      resolve(await botLogado());
+    });
+    w.loadURL('https://accounts.google.com/ServiceLogin?service=youtube&passive=true&continue=' + encodeURIComponent('https://www.youtube.com/signin?action_handle_signin=true&next=%2F')).catch(() => {});
+  });
+});
+ipcMain.handle('bot:sair', async () => {
+  await botSession().clearStorageData().catch(() => {});
+  botRecarregar = true;
+  return false;
+});
+
 function ensureBotWin() {
   if (botWin && !botWin.isDestroyed()) return botWin;
+  botSession();
   botWin = new BrowserWindow({
     show: false,
     width: 640,
@@ -184,6 +244,7 @@ function ensureBotWin() {
       autoplayPolicy: 'no-user-gesture-required',
     },
   });
+  botWin.webContents.setUserAgent(UA_CHROME());
   const ses = botWin.webContents.session;
   // nega tudo pro YouTube; só deixa o próprio app (file://) capturar o áudio dessa janela
   ses.setPermissionRequestHandler((_wc, p, cb, d) => cb(p === 'display-capture' && String((d && d.securityOrigin) || '').startsWith('file://')));
@@ -201,7 +262,9 @@ async function botLoad(id) {
   const url = 'https://www.youtube.com/watch?v=' + id;
   w.webContents.send('botwin:ctl', { type: 'reset' });
   const cur = w.webContents.getURL();
-  if (/youtube\.com\/watch/.test(cur)) {
+  const recarregar = botRecarregar;
+  botRecarregar = false;
+  if (!recarregar && /youtube\.com\/watch/.test(cur)) {
     const ok = await w.webContents
       .executeJavaScript(`(()=>{const p=document.querySelector('#movie_player'); if(!p||!p.loadVideoById) return false; p.loadVideoById(${JSON.stringify(id)}); return true})()`)
       .catch(() => false);

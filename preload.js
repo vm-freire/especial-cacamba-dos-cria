@@ -22,6 +22,9 @@ contextBridge.exposeInMainWorld('cacamba', {
     close: () => ipcRenderer.invoke('bot:close'),
     search: (q, n) => ipcRenderer.invoke('bot:search', q, n),
     related: (id) => ipcRenderer.invoke('bot:related', id),
+    conta: () => ipcRenderer.invoke('bot:conta'),
+    login: () => ipcRenderer.invoke('bot:login'),
+    sair: () => ipcRenderer.invoke('bot:sair'),
     onState: (cb) => ipcRenderer.on('bot-state', (_e, s) => cb(s)),
   },
   vozes: {

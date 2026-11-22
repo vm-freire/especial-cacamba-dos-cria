@@ -2121,6 +2121,7 @@ function openMusicModal() {
     `<div class="modal-head"><h3>${icon('music')} Bot de música</h3><button class="ibtn" data-act="close">${icon('close')}</button></div>
      <div class="modal-body music">
        <form id="mus-search" class="row"><input type="text" name="q" placeholder="Nome da música ou link do YouTube" autocomplete="off"/><button class="btn primary" type="submit">Buscar</button></form>
+       <div id="mus-conta" class="mus-conta"></div>
        <div id="mus-results"></div>
        <div id="mus-now"></div>
        <div class="row" style="margin-top:12px"><span class="muted" style="font-size:12px;white-space:nowrap">Volume da música pra mim</span><input type="range" min="0" max="150" value="${S.botVolume ?? 70}" data-botvol style="flex:1"/></div>
@@ -2153,6 +2154,18 @@ function openMusicModal() {
       : '<div class="hint" style="padding:10px">Nada encontrado.</div>';
   });
   updateMusicModal();
+  renderMusConta();
+}
+
+// conta do YouTube do bot (só neste PC)
+async function renderMusConta(logado) {
+  const el = $('#mus-conta');
+  if (!el || !bridge.bot || !bridge.bot.conta) return;
+  if (logado === undefined) logado = await bridge.bot.conta().catch(() => false);
+  if (!$('#mus-conta')) return;
+  el.innerHTML = logado
+    ? `<span class="ok">✓</span><div class="grow"><b>Conta do YouTube conectada</b><small class="muted">Com Premium, o que o bot tocar pelo seu PC sai sem anúncio pra todo mundo.</small></div><button class="btn ghost sm" data-act="yt-sair">Sair</button>`
+    : `<div class="grow"><b>Tocando com anúncios</b><small class="muted">Os anúncios ficam mudos e são pulados. Tem YouTube Premium? Entre pra tocar sem anúncio.</small></div><button class="btn primary sm" data-act="yt-login">Entrar com o YouTube</button>`;
 }
 
 function updateMusicModal() {
@@ -2164,7 +2177,7 @@ function updateMusicModal() {
     return;
   }
   el.innerHTML = `
-    <div class="label">Tocando agora</div>
+    <div class="label">Tocando agora <span class="muted" style="text-transform:none;letter-spacing:0;font-weight:400">· pelo PC de ${esc(b.hostName || '?')}${b.hostPremium ? ' (sem anúncios)' : ''}</span></div>
     <div class="mus-item now"><img src="${esc(b.now.thumb)}" alt=""/><div class="grow"><b class="ellipsis">${esc(b.now.title)}</b><small class="muted"><span id="mus-pos">${fmtDur(botPos(b))}</span> / ${fmtDur(b.now.duration)} · ${b.now.by === 'autoplay' ? 'autoplay' : 'pedido por ' + esc(b.now.by)}</small></div>
       <button class="ibtn" data-act="bot-ctl" data-c="${b.paused ? 'resume' : 'pause'}">${icon(b.paused ? 'play' : 'pause')}</button>
       <button class="ibtn" data-act="bot-ctl" data-c="skip" title="Pular">${icon('skip')}</button>
@@ -3396,6 +3409,19 @@ document.addEventListener('click', async (e) => {
       break;
     case 'att-download':
       downloadAtt(b.dataset.id);
+      break;
+    case 'yt-login': {
+      b.disabled = true;
+      toast('Entre com a sua conta na janela do Google que abriu.');
+      const ok = await bridge.bot.login();
+      if (ok === null) break;
+      renderMusConta(ok);
+      if (ok) toast('Conta do YouTube conectada. ' + (bot.amHost() ? 'Vale a partir da próxima música.' : 'Quando você ligar o bot, toca sem anúncio.'));
+      break;
+    }
+    case 'yt-sair':
+      if (!confirm('Sair da conta do YouTube no bot? Volta a tocar com anúncios (mudos).')) break;
+      renderMusConta(await bridge.bot.sair());
       break;
     case 'music':
       openMusicModal();

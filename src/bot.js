@@ -85,6 +85,7 @@ export function createMusicBot(ctx) {
     src.connect(gain);
     gain.connect(dest);
     const track = dest.stream.getAudioTracks()[0];
+    const premium = await (bridge.bot.conta ? bridge.bot.conta().catch(() => false) : false);
     host = {
       serverId,
       stream,
@@ -98,6 +99,7 @@ export function createMusicBot(ctx) {
         hostSid: st.sid,
         hostUid: st.user.uid,
         hostName: st.me.name,
+        hostPremium: !!premium,
         at: Date.now(),
         now: null,
         queue: [],
