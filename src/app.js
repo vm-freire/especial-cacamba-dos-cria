@@ -161,9 +161,13 @@ function toast(msg, err = false) {
 }
 
 const initials = (name) => (name || '?').trim().charAt(0).toUpperCase();
-function avatar(name, color, speakKey = '', extra = '') {
+// uid opcional: se a pessoa tiver foto de perfil, mostra a foto no lugar da inicial
+const photoOf = (uid) => (uid && (uid === st.user?.uid ? st.me?.photo : st.members.get(uid)?.photo)) || '';
+const titleOf = (uid) => (uid && (uid === st.user?.uid ? st.me?.title : st.members.get(uid)?.title)) || '';
+function avatar(name, color, speakKey = '', extra = '', uid = '') {
   const sp = speakKey && st.speaking.has(speakKey) ? ' speaking' : '';
-  return `<div class="avatar${sp} ${extra}" ${speakKey ? `data-speak="${speakKey}"` : ''} style="background:${esc(color || '#f0b232')}">${esc(initials(name))}</div>`;
+  const ph = photoOf(uid);
+  return `<div class="avatar${sp} ${extra}" ${speakKey ? `data-speak="${speakKey}"` : ''} style="background:${esc(color || '#f0b232')}">${ph ? `<img src="${esc(ph)}" alt=""/>` : esc(initials(name))}</div>`;
 }
 
 function blip(kind) {
@@ -916,7 +920,7 @@ function renderSidebar() {
         <div class="rooms-title"><span class="label">Mensagens / convites</span></div>
         ${st.notifications.length ? st.notifications.map((n) => `<div class="rm">${icon(n.type === 'server-invite' ? 'mail' : 'people', 'sm')}<span class="ellipsis">${esc(n.fromName)}</span></div>`).join('') : '<div class="hint" style="padding:0 8px">Nada novo.</div>'}
         <div class="rooms-title"><span class="label">Amigos — ${friends.length}</span></div>
-        ${friends.map((m) => `<div class="rm" data-uid="${m.id}">${avatar(m.name, m.color)}<span class="ellipsis">${esc(m.name)}</span><span class="flags"><i class="status ${on.has(m.id) ? 'on' : ''}"></i></span></div>`).join('') || '<div class="hint" style="padding:0 8px">Adicione a galera na aba Adicionar amigo.</div>'}
+        ${friends.map((m) => `<div class="rm" data-uid="${m.id}">${avatar(m.name, m.color, '', '', m.id)}<span class="rm-who"><span class="ellipsis">${esc(m.name)}</span>${m.title ? `<small class="ellipsis">${esc(m.title)}</small>` : ''}</span><span class="flags"><i class="status ${on.has(m.id) ? 'on' : ''}"></i></span></div>`).join('') || '<div class="hint" style="padding:0 8px">Adicione a galera na aba Adicionar amigo.</div>'}
       </div>`;
     return;
   }
@@ -937,13 +941,13 @@ function renderSidebar() {
         .map((r) => {
           const ms = roomMembers(r.id);
           return `<div class="room ${st.roomId === r.id ? 'on' : ''}" data-act="join" data-room="${r.id}">${icon('voice', 'sm')}<span class="ellipsis">${esc(r.name)}</span>${ms.length ? `<span class="count">${ms.length}</span>` : ''}</div>
-          ${ms.length ? `<div class="room-members">${ms.map((p) => `<div class="rm" data-sid="${p.sid}">${avatar(p.name, p.color, p.sid)}<span class="ellipsis">${esc(p.name)}</span>${flags(p)}</div>`).join('')}</div>` : ''}`;
+          ${ms.length ? `<div class="room-members">${ms.map((p) => `<div class="rm" data-sid="${p.sid}">${avatar(p.name, p.color, p.sid, '', p.uid)}<span class="ellipsis">${esc(p.name)}</span>${flags(p)}</div>`).join('')}</div>` : ''}`;
         })
         .join('')}
     </div>
     <div class="online-list">
       <div class="label" style="margin-top:10px">Membros — ${svMembers.length}</div>
-      ${svMembers.map((m) => `<div class="rm ${on.has(m.id) ? '' : 'offline'}" data-uid="${m.id}">${avatar(m.name, m.color)}<span class="ellipsis">${esc(m.name)}${sv.ownerId === m.id ? ' 👑' : ''}</span><span class="flags"><i class="status ${on.has(m.id) ? 'on' : ''}"></i></span></div>`).join('')}
+      ${svMembers.map((m) => `<div class="rm ${on.has(m.id) ? '' : 'offline'}" data-uid="${m.id}">${avatar(m.name, m.color, '', '', m.id)}<span class="rm-who"><span class="ellipsis">${esc(m.name)}${sv.ownerId === m.id ? ' 👑' : ''}</span>${m.title ? `<small class="ellipsis">${esc(m.title)}</small>` : ''}</span><span class="flags"><i class="status ${on.has(m.id) ? 'on' : ''}"></i></span></div>`).join('')}
     </div>`;
 }
 
@@ -952,8 +956,8 @@ function renderUserPanel() {
   if (!el || !st.me) return;
   const m = st.muted || st.deafened;
   el.innerHTML = `
-    ${avatar(st.me.name, st.me.color, st.sid)}
-    <div class="who"><b class="ellipsis">${esc(st.me.name)}</b><small>${st.roomId ? 'Em chamada' : 'Online'}</small></div>
+    ${avatar(st.me.name, st.me.color, st.sid, '', st.user.uid)}
+    <div class="who"><b class="ellipsis">${esc(st.me.name)}</b><small class="ellipsis">${st.roomId ? 'Em chamada' : esc(st.me.title || 'Online')}</small></div>
     <button class="ibtn ${m ? 'off' : ''}" data-act="mute" title="Mutar (Ctrl+Shift+M)">${icon(m ? 'micOff' : 'mic')}</button>
     <button class="ibtn ${st.deafened ? 'off' : ''}" data-act="deafen" title="Desativar áudio (Ctrl+Shift+D)">${icon(st.deafened ? 'headsetOff' : 'headset')}</button>
     <button class="ibtn" data-act="settings" title="Configurações">${icon('gear')}</button>`;
@@ -1003,7 +1007,7 @@ function renderHead() {
 function renderHome(el) {
   const on = onlineUids();
   const friendIds = new Set(st.me.friends || []);
-  const card = (m, actions) => `<div class="friend" data-uid="${m.id}">${avatar(m.name, m.color)}<div class="grow"><b>${esc(m.name)}</b><small class="muted">${on.has(m.id) ? 'Online' : 'Offline'}</small></div>${actions}</div>`;
+  const card = (m, actions) => `<div class="friend" data-uid="${m.id}">${avatar(m.name, m.color, '', '', m.id)}<div class="grow"><b>${esc(m.name)}</b><small class="muted">${on.has(m.id) ? 'Online' : 'Offline'}${m.title ? ` · ${esc(m.title)}` : ''}</small></div>${actions}</div>`;
   let body = '';
   if (st.homeTab === 'online' || st.homeTab === 'all') {
     const list = myFriends().filter((m) => st.homeTab === 'all' || on.has(m.id));
@@ -1119,7 +1123,7 @@ function renderStage() {
     t.classList.toggle('small', many);
     t.dataset.sid = p.sid;
     t.dataset.speak = p.sid;
-    const avHtml = avatar(p.name, p.color);
+    const avHtml = avatar(p.name, p.color, '', '', p.uid);
     if (t._av !== avHtml) {
       t.querySelector('.av').innerHTML = avHtml;
       t._av = avHtml;
@@ -1384,9 +1388,14 @@ async function openSettings(tab = settingsTab) {
       ${saveBar}`,
     account: `
       <h2>Minha conta</h2>
-      <div class="row" style="margin:16px 0">${avatar(st.me.name, st.me.color, '', '')}<div><b>${esc(st.me.name)}</b><div class="muted">${esc(st.user.email)}</div></div></div>
+      <div class="row profile-head" style="margin:16px 0">${avatar(st.me.name, st.me.color, '', 'big', st.user.uid)}<div class="grow"><b>${esc(st.me.name)}</b>${st.me.title ? `<div class="ptitle">${esc(st.me.title)}</div>` : ''}<div class="muted">${esc(st.user.email)}</div></div></div>
+      <div class="label">Foto de perfil</div>
+      <div class="row"><button class="btn" data-act="pick-photo">Trocar foto</button>${st.me.photo ? '<button class="btn ghost" data-act="remove-photo">Remover foto</button>' : ''}</div>
       <div class="label">Apelido</div>
       <div class="row"><input type="text" id="nick" maxlength="32" value="${esc(st.me.name)}"/><button class="btn" data-act="save-nick">Salvar</button></div>
+      <div class="label">Título</div>
+      <div class="hint" style="margin-bottom:6px">Aparece embaixo do seu apelido. Escreve o que quiser (ou deixa vazio).</div>
+      <div class="row"><input type="text" id="ptitle" maxlength="60" value="${esc(st.me.title || '')}" placeholder="Ex.: o rei da resenha"/><button class="btn" data-act="save-title">Salvar</button></div>
       <div class="label">Cor</div>
       <div class="row">${['#f0b232', '#5865f2', '#23a55a', '#eb459e', '#ed4245', '#3ba5c9', '#e67e22', '#9b59b6']
         .map((c) => `<button data-act="set-color" data-color="${c}" style="width:28px;height:28px;border-radius:50%;background:${c};outline:${st.me.color === c ? '2px solid #fff' : 'none'};outline-offset:2px"></button>`)
@@ -1550,7 +1559,7 @@ function openInviteModal(serverId = st.view) {
       <div class="code-box"><span>${esc(sv.code)}</span><button class="btn primary" data-act="copy-code" data-code="${esc(sv.code)}">Copiar</button></div>
       <div class="hint">Manda esse código no zap. A pessoa clica no <b>+</b> da barra da esquerda → Entrar com código.</div>
       <div class="label">Chamar amigos</div>
-      ${friends.map((m) => `<div class="friend">${avatar(m.name, m.color)}<div class="grow"><b>${esc(m.name)}</b></div><button class="btn" data-act="send-invite" data-uid="${m.id}" data-server="${sv.id}">Convidar</button></div>`).join('') || '<div class="hint" style="margin-bottom:14px">Todos os seus amigos já estão aqui (ou adicione amigos na tela inicial).</div>'}
+      ${friends.map((m) => `<div class="friend">${avatar(m.name, m.color, '', '', m.id)}<div class="grow"><b>${esc(m.name)}</b></div><button class="btn" data-act="send-invite" data-uid="${m.id}" data-server="${sv.id}">Convidar</button></div>`).join('') || '<div class="hint" style="margin-bottom:14px">Todos os seus amigos já estão aqui (ou adicione amigos na tela inicial).</div>'}
     </div>`);
 }
 
@@ -1566,6 +1575,14 @@ function inviteFriendPicker(uid) {
 
 // escolhe uma imagem, recorta quadrada 160x160 e salva como JPEG pequeno (~15 KB)
 function pickServerIcon(serverId) {
+  pickImage(160, async (data) => {
+    await B.setServerIcon(serverId, data);
+    toast('Foto do servidor trocada!');
+  });
+}
+
+// escolhe uma imagem, recorta quadrada (size x size) e entrega um JPEG pequeno em data URL
+function pickImage(size, onData) {
   const input = document.createElement('input');
   input.type = 'file';
   input.accept = 'image/*';
@@ -1580,15 +1597,12 @@ function pickServerIcon(serverId) {
         im.onerror = rej;
         im.src = url;
       });
-      const size = 160;
       const c = document.createElement('canvas');
       c.width = c.height = size;
       const side = Math.min(img.naturalWidth, img.naturalHeight);
       c.getContext('2d').drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, size, size);
       URL.revokeObjectURL(url);
-      const data = c.toDataURL('image/jpeg', 0.85);
-      await B.setServerIcon(serverId, data);
-      toast('Foto do servidor trocada!');
+      await onData(c.toDataURL('image/jpeg', 0.85));
     } catch (e) {
       console.error(e);
       toast('Não consegui usar essa imagem.', true);
@@ -1930,6 +1944,35 @@ document.addEventListener('click', async (e) => {
       }
       break;
     }
+    case 'save-title': {
+      const v = $('#ptitle').value.trim().slice(0, 60);
+      try {
+        await B.updateMember(st.user.uid, { title: v });
+        st.me.title = v;
+        toast(v ? 'Título salvo!' : 'Título removido.');
+        openSettings('account');
+        renderUserPanel();
+      } catch (err) {
+        toast(B.friendlyError(err), true);
+      }
+      break;
+    }
+    case 'pick-photo':
+      pickImage(256, async (data) => {
+        await B.updateMember(st.user.uid, { photo: data });
+        st.me.photo = data;
+        toast('Foto de perfil trocada!');
+        openSettings('account');
+        renderUserPanel();
+      });
+      break;
+    case 'remove-photo':
+      await B.updateMember(st.user.uid, { photo: null }).catch(() => {});
+      st.me.photo = null;
+      toast('Foto removida.');
+      openSettings('account');
+      renderUserPanel();
+      break;
     case 'set-color':
       await B.updateMember(st.user.uid, { color: b.dataset.color }).catch(() => {});
       st.me.color = b.dataset.color;
