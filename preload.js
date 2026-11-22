@@ -36,5 +36,10 @@ contextBridge.exposeInMainWorld('cacamba', {
     parar: () => ipcRenderer.invoke('vozes:parar'),
     onProgresso: (cb) => ipcRenderer.on('vozes-prog', (_e, d) => cb(d)),
   },
+  atividade: {
+    ligar: (on) => ipcRenderer.invoke('atividade:ligar', on),
+    get: () => ipcRenderer.invoke('atividade:get'),
+    onMudou: (cb) => ipcRenderer.on('atividade', (_e, a) => cb(a)),
+  },
   platform: process.platform,
 });

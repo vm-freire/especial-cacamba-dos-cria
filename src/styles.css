@@ -595,3 +595,11 @@ body.fs #fs-btn { display: none; }
 .vc-del { position: absolute; top: 6px; left: 6px; width: 22px; height: 22px; border-radius: 50%; background: rgba(0, 0, 0, 0.55); color: #fff; display: none; place-items: center; }
 .vcard:hover .vc-del { display: grid; }
 .vc-del:hover { background: #d9434b; }
+
+/* jogando / tempo de call */
+.ativ, .rm-who small.ativ { display: block; color: #3ba55d; font-size: 11px; cursor: default; }
+.friend .ativ { margin-top: 2px; }
+.room-members .rm-who { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.call-tempo { margin-left: auto; font-size: 11px; color: var(--muted, #9aa); white-space: nowrap; }
+.room .call-tempo + .count { margin-left: 6px; }
+.conn .call-tempo { margin: 0; color: inherit; font-size: inherit; }

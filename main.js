@@ -263,6 +263,62 @@ ipcMain.handle('vozes:processar', (_e, buf) => voz().processar(buf));
 ipcMain.handle('vozes:info', () => (vozesMod ? vozesMod.info() : null));
 ipcMain.handle('vozes:parar', () => (vozesMod ? vozesMod.parar() : null));
 
+// ---------------- O que estou jogando ----------------
+// A cada 15 s lê a lista de programas abertos (tasklist) e reconhece jogos pelo nome do .exe.
+// Só o NOME do jogo sai do PC; navegador aparece como "No navegador", nunca o site/título.
+const JOGOS = {
+  'valorant-win64-shipping.exe': 'Valorant', 'cs2.exe': 'Counter-Strike 2', 'league of legends.exe': 'League of Legends',
+  'fortniteclient-win64-shipping.exe': 'Fortnite', 'gta5.exe': 'GTA V', 'gta5_enhanced.exe': 'GTA V', 'playgtav.exe': 'GTA V',
+  'robloxplayerbeta.exe': 'Roblox', 'rocketleague.exe': 'Rocket League', 'r5apex.exe': 'Apex Legends', 'r5apex_dx12.exe': 'Apex Legends',
+  'overwatch.exe': 'Overwatch 2', 'dota2.exe': 'Dota 2', 'eldenring.exe': 'Elden Ring', 'fc25.exe': 'EA Sports FC 25', 'fc26.exe': 'EA Sports FC 26',
+  'cod.exe': 'Call of Duty', 'tslgame.exe': 'PUBG', 'rainbowsix.exe': 'Rainbow Six Siege', 'rainbowsix_be.exe': 'Rainbow Six Siege',
+  'deadbydaylight-win64-shipping.exe': 'Dead by Daylight', 'among us.exe': 'Among Us', 'marvel-win64-shipping.exe': 'Marvel Rivals',
+  'rdr2.exe': 'Red Dead Redemption 2', 'cyberpunk2077.exe': 'Cyberpunk 2077', 'stardew valley.exe': 'Stardew Valley', 'terraria.exe': 'Terraria',
+  'rustclient.exe': 'Rust', 'warframe.x64.exe': 'Warframe', 'destiny2.exe': 'Destiny 2', 'palworld-win64-shipping.exe': 'Palworld',
+  'helldivers2.exe': 'Helldivers 2', 'thefinals.exe': 'The Finals', 'brawlhalla.exe': 'Brawlhalla', 'forzahorizon5.exe': 'Forza Horizon 5',
+  'wow.exe': 'World of Warcraft', 'hearthstone.exe': 'Hearthstone', 'osu!.exe': 'osu!', 'geometrydash.exe': 'Geometry Dash',
+  'repo.exe': 'R.E.P.O.', 'lethal company.exe': 'Lethal Company', 'phasmophobia.exe': 'Phasmophobia', 'escapefromtarkov.exe': 'Escape from Tarkov',
+  'minecraft.windows.exe': 'Minecraft', 'minecraftlauncher.exe': 'Minecraft', 'eafc24.exe': 'EA Sports FC 24', 'sotgame.exe': 'Sea of Thieves',
+  'witcher3.exe': 'The Witcher 3', 'hogwartslegacy.exe': 'Hogwarts Legacy', 'nba2k25.exe': 'NBA 2K25', 'nba2k26.exe': 'NBA 2K26',
+};
+const JANELA_OCULTA = /^(N\/A|N\/D|OleMainThreadWndName|MSCTFIME UI|Default IME|GDI\+ Window.*|\.NET-Broadcast.*)$/;
+const NAVEGADORES = new Set(['chrome.exe', 'msedge.exe', 'firefox.exe', 'opera.exe', 'brave.exe', 'vivaldi.exe']);
+const { execFile } = require('child_process');
+const listar = (args) =>
+  new Promise((res) => execFile('tasklist', args, { windowsHide: true, timeout: 10000, maxBuffer: 8 << 20 }, (e, out) => res(e ? '' : String(out))));
+const csv = (line) => (line.match(/"([^"]*)"/g) || []).map((x) => x.slice(1, -1));
+let atividade = null; // { nome, tipo: 'jogo'|'navegador', desde }
+let atividadeTimer = null;
+async function detectarAtividade() {
+  const out = await listar(['/fo', 'csv', '/nh']);
+  if (!out) return;
+  const exes = new Set(out.split(/\r?\n/).map((l) => (csv(l)[0] || '').toLowerCase()).filter(Boolean));
+  let achou = null;
+  for (const exe of exes) if (JOGOS[exe]) { achou = { nome: JOGOS[exe], tipo: 'jogo' }; break; }
+  if (!achou) {
+    // navegador só conta se tiver uma janela aberta (o título é lido aqui e descartado)
+    for (const exe of exes) {
+      if (!NAVEGADORES.has(exe)) continue;
+      const v = await listar(['/v', '/fo', 'csv', '/nh', '/fi', `IMAGENAME eq ${exe}`]);
+      if (v.split(/\r?\n/).some((l) => { const t = csv(l).pop(); return t && !JANELA_OCULTA.test(t); })) { achou = { nome: 'No navegador', tipo: 'navegador' }; break; }
+    }
+  }
+  const antes = atividade;
+  if (!achou) atividade = null;
+  else if (!antes || antes.nome !== achou.nome) atividade = { ...achou, desde: Date.now() };
+  if ((antes && antes.nome) !== (atividade && atividade.nome)) send('atividade', atividade);
+}
+ipcMain.handle('atividade:ligar', (_e, on) => {
+  clearInterval(atividadeTimer);
+  atividadeTimer = null;
+  if (on && process.platform === 'win32') {
+    atividadeTimer = setInterval(() => detectarAtividade().catch(() => {}), 15000);
+    detectarAtividade().catch(() => {});
+  } else atividade = null;
+  return atividade;
+});
+ipcMain.handle('atividade:get', () => atividade);
+
 ipcMain.handle('app:open', (_e, url) => {
   if (/^https?:/.test(url)) shell.openExternal(url);
 });

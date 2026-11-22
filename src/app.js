@@ -52,6 +52,7 @@ const DEFAULTS = {
   quality: '1080p60',
   mode: 'motion',
   shareAudio: true,
+  mostrarJogo: true, // mostra pros outros o jogo aberto (ou "No navegador")
   codec: 'h264',
   uiSounds: true,
   userVolumes: {},
@@ -424,6 +425,7 @@ async function startSession() {
   ];
   st.presenceObj = new B.Presence(st.sid, st.user.uid);
   await st.presenceObj.start(presenceState());
+  iniciarAtividade();
   setView(st.view, true);
   renderMain();
 }
@@ -476,8 +478,59 @@ function presenceState() {
     deafened: st.deafened,
     sharing: st.sharing,
     cam: st.cam,
+    callSince: st.callSince || null,
+    atividade: S.mostrarJogo ? st.atividade || null : null,
   };
 }
+
+// ---------------------------------------------------------------- jogando / tempo de call
+const ATV = () => window.cacamba && window.cacamba.atividade;
+function iniciarAtividade() {
+  const api = ATV();
+  if (!api) return;
+  if (!st.atvOuvindo) {
+    st.atvOuvindo = true;
+    api.onMudou((a) => {
+      st.atividade = a;
+      if (st.presenceObj) st.presenceObj.set({ atividade: S.mostrarJogo ? a || null : null });
+    });
+  }
+  api.ligar(!!S.mostrarJogo).then((a) => {
+    st.atividade = a;
+    if (st.presenceObj) st.presenceObj.set({ atividade: S.mostrarJogo ? a || null : null });
+  });
+}
+// só horas e minutos
+function fmtTempo(ms) {
+  const min = Math.max(0, Math.floor(ms / 60000));
+  if (min < 1) return 'menos de 1 min';
+  if (min < 60) return `${min} min`;
+  return `${Math.floor(min / 60)} h ${String(min % 60).padStart(2, '0')} min`;
+}
+const atividadeDe = (uid) => (st.presence.find((p) => p.uid === uid && p.atividade && p.atividade.nome) || {}).atividade || null;
+// na lista aparece só o nome; passando o mouse aparece o tempo
+function ativHtml(a) {
+  if (!a || !a.nome) return '';
+  const nav = a.tipo === 'navegador';
+  return `<small class="ativ ellipsis" data-ativ="${esc(a.nome)}" data-nav="${nav ? 1 : ''}" data-desde="${Number(a.desde) || 0}">${nav ? '🌐' : '🎮'} ${esc(a.nome)}</small>`;
+}
+const ativTitulo = (el) => `${el.dataset.nav ? 'No navegador' : 'Jogando ' + el.dataset.ativ} há ${fmtTempo(Date.now() - Number(el.dataset.desde))}`;
+document.addEventListener('mouseover', (e) => {
+  const el = e.target.closest && e.target.closest('[data-ativ]');
+  if (el) el.title = ativTitulo(el);
+});
+// call aberta desde: o primeiro que entra numa sala vazia marca; quem entra depois herda; zera quando esvazia
+const callDesde = (roomId) => {
+  const ts = roomMembers(roomId).map((p) => Number(p.callSince) || 0).filter(Boolean);
+  return ts.length ? Math.min(...ts) : 0;
+};
+const callTempoHtml = (roomId, prefixo = '') => {
+  const d = callDesde(roomId);
+  return d ? `<span class="call-tempo" data-call-desde="${d}" data-prefixo="${esc(prefixo)}" title="Tempo de call aberta">${prefixo}${fmtTempo(Date.now() - d)}</span>` : '';
+};
+setInterval(() => {
+  document.querySelectorAll('[data-call-desde]').forEach((el) => (el.textContent = el.dataset.prefixo + fmtTempo(Date.now() - Number(el.dataset.callDesde))));
+}, 20000);
 
 async function teardown() {
   await leaveRoom(true);
@@ -607,7 +660,8 @@ async function joinRoom(roomId) {
     },
   });
   // mesh existe ANTES de anunciar a presença na sala (para não perder ofertas)
-  await st.presenceObj.set({ roomId, serverId: st.roomServerId });
+  st.callSince = callDesde(roomId) || Date.now();
+  await st.presenceObj.set({ roomId, serverId: st.roomServerId, callSince: st.callSince });
   onPresence(st.presence);
   blip('join-self');
   renderMain();
@@ -633,7 +687,8 @@ async function leaveRoom(silent = false) {
     mic.destroy();
     mic = null;
   }
-  if (st.presenceObj) await st.presenceObj.set({ roomId: null, serverId: null, sharing: false, cam: false });
+  st.callSince = null;
+  if (st.presenceObj) await st.presenceObj.set({ roomId: null, serverId: null, sharing: false, cam: false, callSince: null });
   if (!silent) {
     blip('leave-self');
     renderMain();
@@ -1475,7 +1530,7 @@ function renderSidebar() {
         <div class="rooms-title"><span class="label">Mensagens / convites</span></div>
         ${st.notifications.length ? st.notifications.map((n) => `<div class="rm">${icon(n.type === 'server-invite' ? 'mail' : 'people', 'sm')}<span class="ellipsis">${esc(n.fromName)}</span></div>`).join('') : '<div class="hint" style="padding:0 8px">Nada novo.</div>'}
         <div class="rooms-title"><span class="label">Amigos — ${friends.length}</span></div>
-        ${friends.map((m) => `<div class="rm" data-uid="${m.id}">${avatar(m.name, m.color, '', '', m.id)}<span class="rm-who"><span class="ellipsis">${esc(m.name)}</span>${m.title ? `<small class="ellipsis">${esc(m.title)}</small>` : ''}</span><span class="flags"><i class="status ${on.has(m.id) ? 'on' : ''}"></i></span></div>`).join('') || '<div class="hint" style="padding:0 8px">Adicione a galera na aba Adicionar amigo.</div>'}
+        ${friends.map((m) => `<div class="rm" data-uid="${m.id}">${avatar(m.name, m.color, '', '', m.id)}<span class="rm-who"><span class="ellipsis">${esc(m.name)}</span>${atividadeDe(m.id) ? ativHtml(atividadeDe(m.id)) : m.title ? `<small class="ellipsis">${esc(m.title)}</small>` : ''}</span><span class="flags"><i class="status ${on.has(m.id) ? 'on' : ''}"></i></span></div>`).join('') || '<div class="hint" style="padding:0 8px">Adicione a galera na aba Adicionar amigo.</div>'}
       </div>`;
     return;
   }
@@ -1499,14 +1554,14 @@ function renderSidebar() {
       ${voiceRooms()
         .map((r) => {
           const ms = roomMembers(r.id);
-          return `<div class="room ${st.roomId === r.id && st.mode === 'stage' ? 'on' : ''} ${st.roomId === r.id ? 'joined' : ''}" data-act="join" data-room="${r.id}">${icon('voice', 'sm')}<span class="ellipsis">${esc(r.name)}</span>${ms.length ? `<span class="count">${ms.length}</span>` : ''}<button class="room-chat ${st.mode === 'chat' && currentText()?.id === r.id ? 'on' : ''}" data-act="open-text" data-room="${r.id}" title="Chat do canal ${esc(r.name)}">${icon('chat', 'sm')}</button></div>
-          ${ms.length ? `<div class="room-members">${ms.map((p) => `<div class="rm" data-sid="${p.sid}">${avatar(p.name, p.color, p.sid, '', p.uid)}<span class="ellipsis">${esc(p.name)}</span>${flags(p)}</div>`).join('')}${isBotActive(st.bot) && st.bot.roomId === r.id ? `<div class="rm bot-rm" title="Botão direito: volume e controles do bot"><div class="avatar bot-av">${icon('music', 'sm')}</div><span class="ellipsis">Caçamba Bot</span><span class="bot-tag">BOT</span></div>` : ''}</div>` : ''}`;
+          return `<div class="room ${st.roomId === r.id && st.mode === 'stage' ? 'on' : ''} ${st.roomId === r.id ? 'joined' : ''}" data-act="join" data-room="${r.id}">${icon('voice', 'sm')}<span class="ellipsis">${esc(r.name)}</span>${ms.length ? callTempoHtml(r.id) : ''}${ms.length ? `<span class="count">${ms.length}</span>` : ''}<button class="room-chat ${st.mode === 'chat' && currentText()?.id === r.id ? 'on' : ''}" data-act="open-text" data-room="${r.id}" title="Chat do canal ${esc(r.name)}">${icon('chat', 'sm')}</button></div>
+          ${ms.length ? `<div class="room-members">${ms.map((p) => `<div class="rm" data-sid="${p.sid}">${avatar(p.name, p.color, p.sid, '', p.uid)}<span class="rm-who"><span class="ellipsis">${esc(p.name)}</span>${ativHtml(p.atividade)}</span>${flags(p)}</div>`).join('')}${isBotActive(st.bot) && st.bot.roomId === r.id ? `<div class="rm bot-rm" title="Botão direito: volume e controles do bot"><div class="avatar bot-av">${icon('music', 'sm')}</div><span class="ellipsis">Caçamba Bot</span><span class="bot-tag">BOT</span></div>` : ''}</div>` : ''}`;
         })
         .join('')}
     </div>
     <div class="online-list">
       <div class="label" style="margin-top:10px">Membros — ${svMembers.length}</div>
-      ${svMembers.map((m) => `<div class="rm ${on.has(m.id) ? '' : 'offline'}" data-uid="${m.id}">${avatar(m.name, m.color, '', '', m.id)}<span class="rm-who"><span class="ellipsis">${esc(m.name)}${sv.ownerId === m.id ? ' 👑' : ''}</span>${m.title ? `<small class="ellipsis">${esc(m.title)}</small>` : ''}</span><span class="flags"><i class="status ${on.has(m.id) ? 'on' : ''}"></i></span></div>`).join('')}
+      ${svMembers.map((m) => `<div class="rm ${on.has(m.id) ? '' : 'offline'}" data-uid="${m.id}">${avatar(m.name, m.color, '', '', m.id)}<span class="rm-who"><span class="ellipsis">${esc(m.name)}${sv.ownerId === m.id ? ' 👑' : ''}</span>${atividadeDe(m.id) ? ativHtml(atividadeDe(m.id)) : m.title ? `<small class="ellipsis">${esc(m.title)}</small>` : ''}</span><span class="flags"><i class="status ${on.has(m.id) ? 'on' : ''}"></i></span></div>`).join('')}
     </div>`;
 }
 
@@ -1569,7 +1624,7 @@ function renderHead() {
   const waiting = peers.length && peers.every((s) => s === 'new');
   const n = roomMembers(st.roomId).length;
   el.innerHTML = `${icon('voice')}<h2>${esc(room.name)}</h2>
-    <span class="conn ${connecting ? 'warn' : ''}">${connecting ? (failed ? `Rede bloqueou a conexão com ${connecting}, tentando de novo...` : waiting ? `Esperando resposta de ${connecting}...` : `Conectando com ${connecting}...`) : 'Voz conectada'} • ${n} na sala</span>
+    <span class="conn ${connecting ? 'warn' : ''}">${connecting ? (failed ? `Rede bloqueou a conexão com ${connecting}, tentando de novo...` : waiting ? `Esperando resposta de ${connecting}...` : `Conectando com ${connecting}...`) : 'Voz conectada'} • ${n} na sala${callDesde(st.roomId) ? ` • ${callTempoHtml(st.roomId, 'aberta há ')}` : ''}</span>
     <div class="grow"></div>
     <button class="btn ghost" data-act="toggle-sb">${icon('sound', 'sm')} Soundboard</button>`;
 }
@@ -1577,7 +1632,7 @@ function renderHead() {
 function renderHome(el) {
   const on = onlineUids();
   const friendIds = new Set(st.me.friends || []);
-  const card = (m, actions) => `<div class="friend" data-uid="${m.id}">${avatar(m.name, m.color, '', '', m.id)}<div class="grow"><b>${esc(m.name)}</b><small class="muted">${on.has(m.id) ? 'Online' : 'Offline'}${m.title ? ` · ${esc(m.title)}` : ''}</small></div>${actions}</div>`;
+  const card = (m, actions) => `<div class="friend" data-uid="${m.id}">${avatar(m.name, m.color, '', '', m.id)}<div class="grow"><b>${esc(m.name)}</b><small class="muted">${on.has(m.id) ? 'Online' : 'Offline'}${m.title ? ` · ${esc(m.title)}` : ''}</small>${on.has(m.id) ? ativHtml(atividadeDe(m.id)) : ''}</div>${actions}</div>`;
   let body = '';
   if (st.homeTab === 'online' || st.homeTab === 'all') {
     const list = myFriends().filter((m) => st.homeTab === 'all' || on.has(m.id));
@@ -2454,6 +2509,7 @@ async function openSettings(tab = settingsTab) {
       <input type="range" min="-80" max="-10" value="${S.gateThreshold}" data-set-num="gateThreshold"/>
       <div class="label">Outros</div>
       ${sw('uiSounds', 'Sons de entrada/saída e mute', 'Bipes quando alguém entra, sai ou você muta.')}
+      ${sw('mostrarJogo', 'Mostrar o que estou jogando', 'Os outros veem o nome do jogo aberto (ou "No navegador", sem o site).')}
       ${saveBar}`,
     stream: `
       <h2>Transmissão de tela</h2>
@@ -2579,6 +2635,7 @@ async function openSettings(tab = settingsTab) {
     saveSettings();
     b.classList.toggle('on', S[k]);
     if (k === 'startFullscreen') bridge.setFullscreen(S[k]);
+    if (k === 'mostrarJogo') iniciarAtividade();
     if (mic) await mic.update({ ...S });
   });
 
