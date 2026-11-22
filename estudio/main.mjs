@@ -17,6 +17,14 @@ const TMP = path.join(os.tmpdir(), 'estudio-vozes');
 fs.mkdirSync(TMP, { recursive: true });
 
 let win = null;
+// uma janela só: clicar no atalho de novo traz a que já está aberta pra frente
+if (!app.requestSingleInstanceLock()) app.exit(0);
+app.on('second-instance', () => {
+  if (!win) return;
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+});
 app.whenReady().then(() => {
   win = new BrowserWindow({
     width: 1100,
@@ -28,6 +36,7 @@ app.whenReady().then(() => {
     webPreferences: { preload: path.join(here, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: false },
   });
   win.loadFile(path.join(here, 'index.html'));
+  win.once('ready-to-show', () => win.focus());
   win.webContents.session.setPermissionRequestHandler((_wc, p, cb) => cb(p === 'media'));
 });
 app.on('window-all-closed', () => app.quit());
