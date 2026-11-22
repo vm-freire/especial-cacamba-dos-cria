@@ -21,7 +21,17 @@ export class MicPipeline {
     this.gate.gain.value = 0;
     this.inGain.connect(this.analyser);
     this.inGain.connect(this.gate);
-    this.gate.connect(this.dest);
+    // mudo separado do gate: o monitor escuta antes do mudo, os amigos escutam depois
+    this.muteGain = this.ctx.createGain();
+    this.muteGain.gain.value = 1;
+    this.gate.connect(this.muteGain);
+    this.muteGain.connect(this.dest);
+    // "ouvir meu microfone": som já processado (ruído/gate) indo para o alto-falante
+    this.monitor = this.ctx.createGain();
+    this.monitor.gain.value = 0;
+    this.gate.connect(this.monitor);
+    this.monitor.connect(this.ctx.destination);
+    this.monitoring = false;
     this.buf = new Float32Array(this.analyser.fftSize);
     this.raw = null;
     this.src = null;
@@ -57,10 +67,26 @@ export class MicPipeline {
     try {
       raw = await navigator.mediaDevices.getUserMedia(constraints);
     } catch (err) {
-      // dispositivo salvo sumiu -> tenta o padrão
+      // o ID do dispositivo mudou (acontece no Windows): procura pelo nome salvo, senão usa o padrão
       delete constraints.audio.deviceId;
-      raw = await navigator.mediaDevices.getUserMedia(constraints);
+      let byLabel = null;
+      if (s.inputDeviceLabel) {
+        try {
+          const devs = await navigator.mediaDevices.enumerateDevices();
+          byLabel = devs.find((d) => d.kind === 'audioinput' && d.label === s.inputDeviceLabel);
+        } catch (_) {}
+      }
+      if (byLabel) constraints.audio.deviceId = { exact: byLabel.deviceId };
+      raw = await navigator.mediaDevices.getUserMedia(constraints).catch(async () => {
+        delete constraints.audio.deviceId;
+        return navigator.mediaDevices.getUserMedia(constraints);
+      });
+      if (byLabel) {
+        s.inputDevice = byLabel.deviceId;
+        if (this.onDeviceFixed) this.onDeviceFixed(byLabel.deviceId);
+      }
     }
+    this.deviceLabel = raw.getAudioTracks()[0]?.label || '';
     this.stopRaw();
     this.raw = raw;
     this.src = this.ctx.createMediaStreamSource(raw);
@@ -99,6 +125,16 @@ export class MicPipeline {
     this.muted = m;
   }
 
+  async setMonitor(on, sinkId) {
+    this.monitoring = on;
+    if (on && this.ctx.setSinkId) {
+      try {
+        await this.ctx.setSinkId(sinkId && sinkId !== 'default' ? sinkId : '');
+      } catch (_) {}
+    }
+    this.monitor.gain.setTargetAtTime(on ? 1 : 0, this.ctx.currentTime, 0.02);
+  }
+
   tick() {
     if (!this.src) return;
     const s = this.settings;
@@ -107,9 +143,9 @@ export class MicPipeline {
     const threshold = s.gateEnabled ? s.gateThreshold : -60;
     if (this.db > threshold) this.lastOpen = now;
     const open = s.gateEnabled ? now - this.lastOpen < 280 : true;
-    const pass = open && !this.muted;
     const t = this.ctx.currentTime;
-    this.gate.gain.setTargetAtTime(pass ? 1 : 0, t, pass ? 0.004 : 0.06);
+    this.gate.gain.setTargetAtTime(open ? 1 : 0, t, open ? 0.004 : 0.06);
+    this.muteGain.gain.setTargetAtTime(this.muted ? 0 : 1, t, 0.01);
     const speaking = !this.muted && now - this.lastOpen < 280;
     if (speaking !== this.speaking) {
       this.speaking = speaking;

@@ -12,9 +12,19 @@ service cloud.firestore {
       return request.auth.uid in get(/databases/$(db)/documents/servers/$(serverId)).data.members;
     }
 
+    // apelido único: o documento /usernames/{apelido minúsculo} diz de quem ele é
+    match /usernames/{key} {
+      allow get: if true;
+      allow create: if signedIn() && request.resource.data.uid == request.auth.uid;
+      allow delete: if signedIn() && resource.data.uid == request.auth.uid;
+    }
+
     match /members/{uid} {
       allow read: if signedIn();
-      allow create, update: if signedIn() && request.auth.uid == uid && validName(request.resource.data.name, 32);
+      allow create, update: if signedIn() && request.auth.uid == uid
+        && validName(request.resource.data.name, 32)
+        && request.resource.data.nameLower == request.resource.data.name.trim().lower()
+        && getAfter(/databases/$(db)/documents/usernames/$(request.resource.data.nameLower)).data.uid == request.auth.uid;
     }
 
     match /servers/{id} {
@@ -27,6 +37,8 @@ service cloud.firestore {
       allow update: if member() && (
         resource.data.ownerId == request.auth.uid
           ? request.resource.data.ownerId == resource.data.ownerId && validName(request.resource.data.name, 40)
+            && (!('icon' in request.resource.data) || request.resource.data.icon == null
+                || (request.resource.data.icon is string && request.resource.data.icon.size() < 300000))
           : request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members'])
       );
       allow delete: if signedIn() && resource.data.ownerId == request.auth.uid;

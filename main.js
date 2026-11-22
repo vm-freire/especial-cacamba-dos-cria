@@ -79,8 +79,19 @@ function createWindow() {
     if (input.type === 'keyDown' && input.control && input.shift && input.key.toLowerCase() === 'i') {
       win.webContents.toggleDevTools();
     }
+    if (input.type === 'keyDown' && input.key === 'F11') {
+      win.setFullScreen(!win.isFullScreen());
+    }
   });
+  win.on('enter-full-screen', () => send('fullscreen', true));
+  win.on('leave-full-screen', () => send('fullscreen', false));
 }
+
+ipcMain.handle('win:fullscreen', (_e, on) => {
+  if (!win) return false;
+  win.setFullScreen(on === undefined ? !win.isFullScreen() : !!on);
+  return win.isFullScreen();
+});
 
 function setupMedia() {
   const ses = session.defaultSession;
@@ -137,16 +148,17 @@ ipcMain.handle('app:open', (_e, url) => {
   if (/^https?:/.test(url)) shell.openExternal(url);
 });
 ipcMain.handle('update:install', () => {
-  if (autoUpdater) autoUpdater.quitAndInstall(false, true);
+  if (autoUpdater) setImmediate(() => autoUpdater.quitAndInstall(true, true));
 });
+ipcMain.handle('update:state', () => updateState);
 ipcMain.handle('update:check', async () => {
-  if (!autoUpdater || !app.isPackaged) return { ok: false, reason: 'dev' };
+  if (!autoUpdater || !app.isPackaged) return { state: 'dev', current: app.getVersion() };
   try {
-    const r = await autoUpdater.checkForUpdates();
-    return { ok: true, version: r && r.updateInfo ? r.updateInfo.version : null };
+    await autoUpdater.checkForUpdates();
   } catch (e) {
-    return { ok: false, reason: String(e.message || e) };
+    setUpdate({ state: 'error', message: String(e.message || e) });
   }
+  return updateState;
 });
 
 function send(channel, ...args) {
@@ -159,15 +171,29 @@ function setupShortcuts() {
   globalShortcut.register('CommandOrControl+Shift+D', () => send('shortcut', 'deafen'));
 }
 
+// Atualização automática: procura ao abrir o app e a cada 30 min; baixa sozinho.
+let updateState = { state: 'idle', current: app.getVersion() };
+function setUpdate(patch) {
+  updateState = { ...updateState, ...patch, current: app.getVersion() };
+  send('update', updateState);
+}
 function setupUpdater() {
-  if (!autoUpdater || !app.isPackaged) return;
+  if (!autoUpdater || !app.isPackaged) {
+    updateState = { state: 'dev', current: app.getVersion() };
+    return;
+  }
   autoUpdater.autoDownload = true;
-  autoUpdater.on('update-available', (info) => send('update', { state: 'available', version: info.version }));
-  autoUpdater.on('download-progress', (p) => send('update', { state: 'progress', percent: p.percent }));
-  autoUpdater.on('update-downloaded', (info) => send('update', { state: 'ready', version: info.version }));
-  autoUpdater.on('error', (e) => console.error('updater', e));
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.on('checking-for-update', () => setUpdate({ state: 'checking' }));
+  autoUpdater.on('update-available', (info) => setUpdate({ state: 'available', version: info.version, percent: 0 }));
+  autoUpdater.on('update-not-available', () => setUpdate({ state: 'latest' }));
+  autoUpdater.on('download-progress', (p) => setUpdate({ state: 'downloading', percent: p.percent }));
+  autoUpdater.on('update-downloaded', (info) => setUpdate({ state: 'ready', version: info.version }));
+  autoUpdater.on('error', (e) => setUpdate({ state: 'error', message: String((e && e.message) || e) }));
   autoUpdater.checkForUpdates().catch(() => {});
-  setInterval(() => autoUpdater.checkForUpdates().catch(() => {}), 1000 * 60 * 60);
+  setInterval(() => {
+    if (updateState.state !== 'downloading' && updateState.state !== 'ready') autoUpdater.checkForUpdates().catch(() => {});
+  }, 1000 * 60 * 30);
 }
 
 app.on('second-instance', () => {

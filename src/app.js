@@ -15,7 +15,10 @@ const bridge = window.cacamba || {
   version: async () => 'dev',
   openExternal: async (u) => window.open(u),
   installUpdate: async () => {},
-  checkUpdate: async () => ({ ok: false }),
+  checkUpdate: async () => ({ state: 'dev' }),
+  updateState: async () => ({ state: 'dev' }),
+  setFullscreen: async () => false,
+  onFullscreen: () => {},
   onShortcut: () => {},
   onUpdate: () => {},
   platform: 'web',
@@ -26,14 +29,18 @@ const modalRoot = $('#modal-root');
 // ---------------------------------------------------------------- configurações
 const DEFAULTS = {
   inputDevice: 'default',
+  inputDeviceLabel: '',
   outputDevice: 'default',
+  outputDeviceLabel: '',
+  startFullscreen: false,
   inputVolume: 100,
   outputVolume: 100,
   sfxVolume: 70,
-  echoCancellation: true,
-  noiseSuppression: true,
-  autoGainControl: true,
-  gateEnabled: true,
+  echoCancellation: false,
+  noiseSuppression: false,
+  autoGainControl: false,
+  gateEnabled: false,
+  settingsVersion: 2,
   gateThreshold: -50,
   quality: '1080p60',
   mode: 'motion',
@@ -50,6 +57,13 @@ let S = { ...DEFAULTS };
 try {
   S = { ...DEFAULTS, ...JSON.parse(localStorage.getItem('cacamba.settings') || '{}') };
 } catch (_) {}
+// v1.0.1: processamento de voz passa a vir desligado (microfone limpo); migra quem veio da 1.0.0
+if ((S.settingsVersion || 1) < 2) {
+  Object.assign(S, { echoCancellation: false, noiseSuppression: false, autoGainControl: false, gateEnabled: false, settingsVersion: 2 });
+  try {
+    localStorage.setItem('cacamba.settings', JSON.stringify(S));
+  } catch (_) {}
+}
 const saveSettings = () => {
   try {
     localStorage.setItem('cacamba.settings', JSON.stringify(S));
@@ -94,11 +108,48 @@ let mesh = null;
 const out = new OutputMixer();
 out.setVolume(S.outputVolume);
 out.setSfxVolume(S.sfxVolume);
-out.setSink(S.outputDevice);
+applyOutputDevice();
 const sfx = new Sfx(out);
 const soundCache = new Map();
 let registering = false;
 let lastSfx = 0;
+
+// alto-falante salvo: tenta pelo ID e, se o Windows trocou o ID, acha pelo nome
+async function applyOutputDevice() {
+  let id = S.outputDevice;
+  if (id && id !== 'default' && S.outputDeviceLabel) {
+    try {
+      const devs = await navigator.mediaDevices.enumerateDevices();
+      const outs = devs.filter((d) => d.kind === 'audiooutput');
+      if (outs.length && outs.some((d) => d.label) && !outs.find((d) => d.deviceId === id)) {
+        const byLabel = outs.find((d) => d.label === S.outputDeviceLabel);
+        if (byLabel) {
+          id = byLabel.deviceId;
+          S.outputDevice = id;
+          saveSettings();
+        }
+      }
+    } catch (_) {}
+  }
+  await out.setSink(id);
+  if (mic && mic.monitoring) mic.setMonitor(true, id);
+}
+
+// ---------------------------------------------------------------- tela cheia
+let isFullscreen = false;
+function renderFsButton() {
+  const b = $('#fs-btn');
+  if (b) {
+    b.innerHTML = icon(isFullscreen ? 'fullExit' : 'full', 'sm');
+    b.title = isFullscreen ? 'Sair da tela cheia (F11)' : 'Tela cheia (F11)';
+  }
+}
+bridge.onFullscreen((on) => {
+  isFullscreen = on;
+  renderFsButton();
+});
+if (S.startFullscreen) bridge.setFullscreen(true);
+renderFsButton();
 
 // ---------------------------------------------------------------- helpers de UI
 function toast(msg, err = false) {
@@ -395,6 +446,10 @@ async function ensureMic() {
   if (mic) return mic;
   try {
     mic = new MicPipeline(S);
+    mic.onDeviceFixed = (id) => {
+      S.inputDevice = id;
+      saveSettings();
+    };
     await mic.start();
     mic.setMuted(st.muted || st.deafened);
     return mic;
@@ -467,6 +522,7 @@ async function leaveRoom(silent = false) {
     blip('leave-self');
     renderMain();
   }
+  setTimeout(maybeAutoInstall, 1500);
 }
 
 function onRemoteTrack(sid, role, track) {
@@ -812,13 +868,16 @@ function renderMain() {
   renderUpdate();
 }
 
-const serverInitials = (name) =>
-  (name || '?')
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((w) => w[0].toUpperCase())
-    .join('');
+// sem foto: primeira e última letra da primeira palavra ("Caçamba dos Cria" -> "CA")
+const serverInitials = (name) => {
+  const w = (name || '?').trim().split(/\s+/)[0] || '?';
+  const chars = [...w];
+  return (chars[0] + (chars.length > 1 ? chars[chars.length - 1] : '')).toUpperCase();
+};
+const serverIcon = (sv) =>
+  sv.icon
+    ? `<img class="srv-img" src="${esc(sv.icon)}" alt=""/>`
+    : `<span class="srv-stripes"><span>${esc(serverInitials(sv.name))}</span></span>`;
 
 function renderRail() {
   const el = $('#rail');
@@ -831,7 +890,7 @@ function renderRail() {
     ${st.servers
       .map(
         (sv) => `<button class="rail-btn ${st.view === sv.id ? 'on' : ''}" data-act="view" data-view="${sv.id}" title="${esc(sv.name)}" style="--c:${esc(sv.color || '#ffb21e')}">
-          <span class="srv">${esc(serverInitials(sv.name))}</span>${st.roomServerId === sv.id ? '<i class="dot"></i>' : ''}</button>`
+          ${serverIcon(sv)}${st.roomServerId === sv.id ? '<i class="dot"></i>' : ''}</button>`
       )
       .join('')}
     <button class="rail-btn add" data-act="add-server" title="Criar ou entrar num servidor">${icon('plus')}</button>`;
@@ -1143,17 +1202,66 @@ function renderSoundboard() {
     </div>`;
 }
 
-function renderUpdate() {
-  const el = $('#update-slot');
-  if (!el) return;
-  el.innerHTML =
-    st.update && st.update.state === 'ready'
-      ? `<div class="update-bar">Versão ${esc(st.update.version)} baixada! <button data-act="install-update">Reiniciar e atualizar</button></div>`
-      : '';
+function updateText(u) {
+  if (!u) return '';
+  switch (u.state) {
+    case 'checking': return 'Procurando atualizações...';
+    case 'available': return `Atualização ${u.version} encontrada. Baixando...`;
+    case 'downloading': return `Baixando atualização${u.version ? ' ' + u.version : ''}... ${Math.round(u.percent || 0)}%`;
+    case 'ready': return `Versão ${u.version} pronta pra instalar.`;
+    case 'latest': return `Você está na versão mais nova (${u.current}).`;
+    case 'error': return 'Não deu pra procurar atualização agora (sem internet?).';
+    case 'dev': return `Modo desenvolvimento (v${u.current}): atualização só no app instalado.`;
+    default: return '';
+  }
 }
+
+function renderUpdate() {
+  const u = st.update;
+  const el = $('#update-slot');
+  if (el) {
+    if (u && (u.state === 'available' || u.state === 'downloading')) {
+      el.innerHTML = `<div class="update-bar dl">${esc(updateText(u))}<span class="upbar"><i style="width:${Math.round(u.percent || 0)}%"></i></span></div>`;
+    } else if (u && u.state === 'ready') {
+      el.innerHTML = `<div class="update-bar">Versão ${esc(u.version)} baixada! <button data-act="install-update">Reiniciar e atualizar agora</button><small>(atualiza sozinho quando você sair da chamada)</small></div>`;
+    } else el.innerHTML = '';
+  }
+  const about = $('#update-status');
+  if (about) about.textContent = updateText(u);
+}
+
+let autoInstallTimer = null;
+function maybeAutoInstall() {
+  const u = st.update;
+  if (!u || u.state !== 'ready' || st.roomId || autoInstallTimer) return;
+  // fora de chamada: avisa e reinicia sozinho
+  let n = 5;
+  const show = () =>
+    openModal(`
+      <div class="modal-head"><h3>Atualizando o app</h3></div>
+      <div class="modal-body"><p>A versão <b>${esc(u.version)}</b> foi baixada. O app vai reiniciar em <b>${n}</b> segundos.</p></div>
+      <div class="modal-foot"><button class="btn ghost" data-act="cancel-update">Agora não</button><button class="btn primary" data-act="install-update">Atualizar agora</button></div>`);
+  show();
+  autoInstallTimer = setInterval(() => {
+    n -= 1;
+    if (n <= 0) {
+      clearInterval(autoInstallTimer);
+      bridge.installUpdate();
+    } else if ($('[data-act="cancel-update"]')) show();
+  }, 1000);
+}
+
 bridge.onUpdate((info) => {
   st.update = info;
   renderUpdate();
+  maybeAutoInstall();
+});
+bridge.updateState().then((info) => {
+  if (info) {
+    st.update = info;
+    renderUpdate();
+    maybeAutoInstall();
+  }
 });
 
 // ---------------------------------------------------------------- loops (falando / ping)
@@ -1217,6 +1325,7 @@ async function openSettings(tab = settingsTab) {
       .map((d) => `<option value="${esc(d.deviceId)}" ${d.deviceId === cur ? 'selected' : ''}>${esc(d.label || (d.deviceId === 'default' ? 'Padrão' : 'Dispositivo'))}</option>`)
       .join('');
 
+  const saveBar = `<div class="save-bar"><span class="muted">As mudanças já valem na hora e ficam guardadas neste PC.</span><button class="btn primary" data-act="save-settings">Salvar</button></div>`;
   const sections = {
     voice: `
       <h2>Voz e áudio</h2>
@@ -1229,7 +1338,10 @@ async function openSettings(tab = settingsTab) {
       <div class="label">Teste do microfone</div>
       <div class="meter" id="mic-meter"><i></i><b style="left:${((S.gateThreshold + 80) / 80) * 100}%"></b></div>
       <div class="hint">Fala alguma coisa: a barra verde mostra seu volume. A linha laranja é o limite do filtro de ruído.</div>
+      <div class="toggle"><div class="t"><b>Ouvir meu microfone</b><small>Escuta sua própria voz (já com o filtro de ruído) pra testar. Use fone, senão dá microfonia. Ninguém mais escuta.</small></div>
+        <button class="switch ${mic && mic.monitoring ? 'on' : ''}" data-act="toggle-monitor"></button></div>
       <div class="label">Processamento de voz</div>
+      <div class="hint" style="margin-bottom:4px">Vem tudo desligado pra voz sair limpa, sem cortes. Liga só o que precisar (ex.: ventilador ou teclado barulhento → supressão de ruído).</div>
       ${sw('noiseSuppression', 'Supressão de ruído', 'Remove ventilador, teclado, barulho de fundo.')}
       ${sw('echoCancellation', 'Cancelamento de eco', 'Evita que seus amigos se escutem pelo seu microfone.')}
       ${sw('autoGainControl', 'Ganho automático', 'Ajusta seu volume sozinho (desliga se seu volume ficar oscilando).')}
@@ -1237,7 +1349,8 @@ async function openSettings(tab = settingsTab) {
       <div class="label">Sensibilidade do filtro — <span data-show="gateThreshold">${S.gateThreshold}</span> dB</div>
       <input type="range" min="-80" max="-10" value="${S.gateThreshold}" data-set-num="gateThreshold"/>
       <div class="label">Outros</div>
-      ${sw('uiSounds', 'Sons de entrada/saída e mute', 'Bipes quando alguém entra, sai ou você muta.')}`,
+      ${sw('uiSounds', 'Sons de entrada/saída e mute', 'Bipes quando alguém entra, sai ou você muta.')}
+      ${saveBar}`,
     stream: `
       <h2>Transmissão de tela</h2>
       <div class="label">Qualidade padrão</div>
@@ -1264,7 +1377,11 @@ async function openSettings(tab = settingsTab) {
       <div class="hint" style="margin-bottom:12px">Funcionam mesmo com o jogo em foco.</div>
       <div class="toggle"><div class="t"><b>Mutar / desmutar microfone</b></div><span class="kbd">Ctrl</span>+<span class="kbd">Shift</span>+<span class="kbd">M</span></div>
       <div class="toggle"><div class="t"><b>Desativar / ativar áudio</b></div><span class="kbd">Ctrl</span>+<span class="kbd">Shift</span>+<span class="kbd">D</span></div>
-      <div class="toggle"><div class="t"><b>Sair do foco / fechar janela</b></div><span class="kbd">Esc</span></div>`,
+      <div class="toggle"><div class="t"><b>Tela cheia</b></div><span class="kbd">F11</span></div>
+      <div class="toggle"><div class="t"><b>Sair do foco / fechar janela</b></div><span class="kbd">Esc</span></div>
+      <div class="label">Janela</div>
+      ${sw('startFullscreen', 'Abrir o app em tela cheia', 'Já começa ocupando a tela toda.')}
+      ${saveBar}`,
     account: `
       <h2>Minha conta</h2>
       <div class="row" style="margin:16px 0">${avatar(st.me.name, st.me.color, '', '')}<div><b>${esc(st.me.name)}</b><div class="muted">${esc(st.user.email)}</div></div></div>
@@ -1288,7 +1405,10 @@ async function openSettings(tab = settingsTab) {
       <h2>Sobre</h2>
       <p>Especial Caçamba dos Cria <b>v${esc(version)}</b></p>
       <p class="muted">Voz e tela direto entre vocês (WebRTC peer-to-peer). O Firebase só guarda as contas, salas e sons.</p>
-      <button class="btn" data-act="check-update">Procurar atualização</button>`,
+      <div class="label">Atualizações</div>
+      <p class="muted">O app procura atualização sozinho toda vez que abre (e a cada 30 minutos), baixa e reinicia quando você não está em chamada.</p>
+      <div class="row"><button class="btn primary" data-act="check-update">Procurar atualização agora</button>${st.update && st.update.state === 'ready' ? '<button class="btn" data-act="install-update">Reiniciar e atualizar</button>' : ''}</div>
+      <p id="update-status" class="hint" style="font-size:13px">${esc(updateText(st.update))}</p>`,
   };
 
   openModal(
@@ -1316,8 +1436,12 @@ async function openSettings(tab = settingsTab) {
     if (t.dataset.set) {
       S[t.dataset.set] = t.value;
       saveSettings();
+      if (t.tagName === 'SELECT' && t.dataset.set.endsWith('Device')) {
+        S[t.dataset.set + 'Label'] = t.selectedOptions[0] ? t.selectedOptions[0].textContent : '';
+        saveSettings();
+      }
       if (t.dataset.set === 'inputDevice' && mic) await mic.update({ ...S });
-      if (t.dataset.set === 'outputDevice') await out.setSink(S.outputDevice);
+      if (t.dataset.set === 'outputDevice') await applyOutputDevice();
     }
   });
   m.addEventListener('input', (e) => {
@@ -1344,6 +1468,7 @@ async function openSettings(tab = settingsTab) {
     S[k] = !S[k];
     saveSettings();
     b.classList.toggle('on', S[k]);
+    if (k === 'startFullscreen') bridge.setFullscreen(S[k]);
     if (mic) await mic.update({ ...S });
   });
 
@@ -1362,6 +1487,7 @@ async function openSettings(tab = settingsTab) {
 }
 
 function onSettingsClosed() {
+  if (mic && mic.monitoring) mic.setMonitor(false);
   // se abriu o mic só para teste e não está em sala, fecha
   if (!st.roomId && mic) {
     mic.destroy();
@@ -1434,8 +1560,41 @@ function inviteFriendPicker(uid) {
   openModal(`
     <div class="modal-head"><h3>Chamar ${esc(m ? m.name : '')} pra qual servidor?</h3><button class="ibtn" data-act="close">${icon('close')}</button></div>
     <div class="modal-body">
-      ${list.map((sv) => `<div class="friend"><span class="srv-mini" style="background:${esc(sv.color)}">${esc(serverInitials(sv.name))}</span><div class="grow"><b>${esc(sv.name)}</b></div><button class="btn" data-act="send-invite" data-uid="${uid}" data-server="${sv.id}">Convidar</button></div>`).join('') || '<div class="hint" style="margin-bottom:14px">Ele já está em todos os seus servidores.</div>'}
+      ${list.map((sv) => `<div class="friend"><span class="srv-mini">${serverIcon(sv)}</span><div class="grow"><b>${esc(sv.name)}</b></div><button class="btn" data-act="send-invite" data-uid="${uid}" data-server="${sv.id}">Convidar</button></div>`).join('') || '<div class="hint" style="margin-bottom:14px">Ele já está em todos os seus servidores.</div>'}
     </div>`);
+}
+
+// escolhe uma imagem, recorta quadrada 160x160 e salva como JPEG pequeno (~15 KB)
+function pickServerIcon(serverId) {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/*';
+  input.onchange = async () => {
+    const file = input.files[0];
+    if (!file) return;
+    try {
+      const url = URL.createObjectURL(file);
+      const img = await new Promise((res, rej) => {
+        const im = new Image();
+        im.onload = () => res(im);
+        im.onerror = rej;
+        im.src = url;
+      });
+      const size = 160;
+      const c = document.createElement('canvas');
+      c.width = c.height = size;
+      const side = Math.min(img.naturalWidth, img.naturalHeight);
+      c.getContext('2d').drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, size, size);
+      URL.revokeObjectURL(url);
+      const data = c.toDataURL('image/jpeg', 0.85);
+      await B.setServerIcon(serverId, data);
+      toast('Foto do servidor trocada!');
+    } catch (e) {
+      console.error(e);
+      toast('Não consegui usar essa imagem.', true);
+    }
+  };
+  input.click();
 }
 
 function serverMenu(btn) {
@@ -1448,6 +1607,7 @@ function serverMenu(btn) {
     r.bottom + 4,
     `<button class="item" data-x="invite">Convidar pessoas</button>
      <button class="item" data-x="room">Criar sala</button>
+     ${owner ? `<button class="item" data-x="icon">Trocar foto do servidor</button>${sv.icon ? '<button class="item" data-x="icon-remove">Remover foto</button>' : ''}` : ''}
      ${owner ? '<button class="item" data-x="rename">Renomear servidor</button><button class="item" data-x="code">Gerar novo código</button><button class="item danger" data-x="delete">Excluir servidor</button>' : '<button class="item danger" data-x="leave">Sair do servidor</button>'}`
   );
   c.addEventListener('click', async (ev) => {
@@ -1457,6 +1617,8 @@ function serverMenu(btn) {
     if (x === 'invite') openInviteModal();
     if (x === 'room') promptText('Nova sala', '', (v) => B.createRoom(sv.id, v, st.rooms.length + 1));
     if (x === 'rename') promptText('Renomear servidor', sv.name, (v) => B.renameServer(sv.id, v));
+    if (x === 'icon') pickServerIcon(sv.id);
+    if (x === 'icon-remove') B.setServerIcon(sv.id, null).then(() => toast('Foto removida.'));
     if (x === 'code') {
       await B.resetServerCode(sv.id);
       toast('Código novo gerado. O antigo não funciona mais.');
@@ -1759,10 +1921,13 @@ document.addEventListener('click', async (e) => {
     case 'save-nick': {
       const v = $('#nick').value.trim();
       if (!v) return;
-      await B.updateMember(st.user.uid, { name: v.slice(0, 32) }).catch((err) => toast(B.friendlyError(err), true));
-      st.me.name = v.slice(0, 32);
-      st.presenceObj.set({ name: st.me.name });
-      toast('Apelido salvo!');
+      try {
+        st.me.name = await B.changeNick(st.user.uid, st.me.name, v);
+        st.presenceObj.set({ name: st.me.name });
+        toast('Apelido salvo!');
+      } catch (err) {
+        toast(B.friendlyError(err), true);
+      }
       break;
     }
     case 'set-color':
@@ -1776,9 +1941,56 @@ document.addEventListener('click', async (e) => {
       break;
     case 'check-update': {
       b.disabled = true;
+      const sEl = $('#update-status');
+      if (sEl) sEl.textContent = 'Procurando atualizações...';
       const r = await bridge.checkUpdate();
       b.disabled = false;
-      toast(r.ok ? (r.version ? `Última versão: ${r.version}` : 'Tudo atualizado.') : 'Não deu pra verificar agora.');
+      if (r) {
+        st.update = r;
+        renderUpdate();
+        maybeAutoInstall();
+      }
+      break;
+    }
+    case 'cancel-update':
+      clearInterval(autoInstallTimer);
+      closeModal();
+      toast('Beleza. Atualiza sozinho quando você fechar o app.');
+      break;
+    case 'fullscreen-app':
+      isFullscreen = await bridge.setFullscreen();
+      renderFsButton();
+      break;
+    case 'toggle-monitor': {
+      if (!mic) await ensureMic();
+      if (!mic) break;
+      await mic.setMonitor(!mic.monitoring, S.outputDevice);
+      b.classList.toggle('on', mic.monitoring);
+      break;
+    }
+    case 'save-settings': {
+      // regrava tudo, guarda o nome dos dispositivos e reaplica
+      const inSel = $('[data-set="inputDevice"]');
+      const outSel = $('[data-set="outputDevice"]');
+      if (inSel) {
+        S.inputDevice = inSel.value;
+        S.inputDeviceLabel = inSel.selectedOptions[0]?.textContent || '';
+      }
+      if (outSel) {
+        S.outputDevice = outSel.value;
+        S.outputDeviceLabel = outSel.selectedOptions[0]?.textContent || '';
+      }
+      saveSettings();
+      if (mic) await mic.update({ ...S });
+      await applyOutputDevice();
+      const ok = (() => {
+        try {
+          return JSON.parse(localStorage.getItem('cacamba.settings')).inputDevice === S.inputDevice;
+        } catch (_) {
+          return false;
+        }
+      })();
+      toast(ok ? 'Configurações salvas!' : 'Não consegui salvar neste PC.', !ok);
       break;
     }
   }

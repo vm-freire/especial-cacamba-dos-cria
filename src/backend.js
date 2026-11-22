@@ -50,30 +50,86 @@ const ERR = {
   'auth/network-request-failed': 'Sem conexão com o servidor.',
   'permission-denied': 'Sem permissão para isso.',
 };
-export const friendlyError = (e) => ERR[e && e.code] || (e && e.message) || String(e);
+export const friendlyError = (e) =>
+  ERR[e && e.code] || (e && String(e.code || '').startsWith('nick/') && e.message) || (e && e.message) || String(e);
 
 // ---------------- Contas ----------------
 export function onAuth(cb) {
   return onAuthStateChanged(auth, cb);
 }
 
+// ---- apelidos únicos: cada apelido (minúsculo) é um documento em /usernames
+export const nickKey = (name) => name.trim().toLowerCase();
+function checkNick(name) {
+  const nick = (name || '').trim();
+  if (nick.length < 2) throw Object.assign(new Error('O apelido precisa ter pelo menos 2 letras.'), { code: 'nick/short' });
+  if (nick.length > 32) throw Object.assign(new Error('O apelido pode ter no máximo 32 caracteres.'), { code: 'nick/long' });
+  if (/[\/]/.test(nick) || /^\.+$/.test(nick) || /^__.*__$/.test(nick))
+    throw Object.assign(new Error('O apelido não pode ter "/" nem ser só pontos.'), { code: 'nick/invalid' });
+  return nick;
+}
+const NICK_TAKEN = () => Object.assign(new Error('Esse apelido já está em uso. Escolhe outro.'), { code: 'nick/taken' });
+
+export async function isNickTaken(name, myUid = null) {
+  const snap = await getDoc(doc(db, 'usernames', nickKey(name)));
+  return snap.exists() && snap.data().uid !== myUid;
+}
+
 export async function register({ name, email, password }) {
+  const nick = checkNick(name);
+  if (await isNickTaken(nick)) throw NICK_TAKEN();
   const cred = await createUserWithEmailAndPassword(auth, email.trim(), password);
-  await completeProfile(cred.user, name);
+  try {
+    await completeProfile(cred.user, nick);
+  } catch (e) {
+    // alguém pegou o apelido no mesmo segundo: desfaz a conta
+    await cred.user.delete().catch(() => {});
+    throw e;
+  }
   return cred.user;
 }
 
 export async function completeProfile(user, name) {
+  const nick = checkNick(name);
+  if (await isNickTaken(nick, user.uid)) throw NICK_TAKEN();
   const color = COLORS[Math.floor(Math.random() * COLORS.length)];
-  const nick = name.trim().slice(0, 32);
-  await setDoc(doc(db, 'members', user.uid), {
+  const b = writeBatch(db);
+  b.set(doc(db, 'usernames', nickKey(nick)), { uid: user.uid });
+  b.set(doc(db, 'members', user.uid), {
     name: nick,
-    nameLower: nick.toLowerCase(),
+    nameLower: nickKey(nick),
     color,
     friends: [],
     createdAt: serverTimestamp(),
   });
+  try {
+    await b.commit();
+  } catch (e) {
+    if (e.code === 'permission-denied') throw NICK_TAKEN();
+    throw e;
+  }
   await updateProfile(user, { displayName: nick }).catch(() => {});
+}
+
+export async function changeNick(uid, oldName, newName) {
+  const nick = checkNick(newName);
+  if (nickKey(nick) === nickKey(oldName || '')) {
+    await updateDoc(doc(db, 'members', uid), { name: nick, nameLower: nickKey(nick) });
+    return nick;
+  }
+  if (await isNickTaken(nick, uid)) throw NICK_TAKEN();
+  const b = writeBatch(db);
+  b.set(doc(db, 'usernames', nickKey(nick)), { uid });
+  if (oldName) b.delete(doc(db, 'usernames', nickKey(oldName)));
+  b.update(doc(db, 'members', uid), { name: nick, nameLower: nickKey(nick) });
+  try {
+    await b.commit();
+  } catch (e) {
+    if (e.code === 'permission-denied') throw NICK_TAKEN();
+    throw e;
+  }
+  if (auth.currentUser) updateProfile(auth.currentUser, { displayName: nick }).catch(() => {});
+  return nick;
 }
 
 export async function login(email, password) {
@@ -89,7 +145,6 @@ export async function getMember(uid) {
 }
 
 export async function updateMember(uid, data) {
-  if (data.name) data.nameLower = data.name.toLowerCase();
   await updateDoc(doc(db, 'members', uid), data);
 }
 
@@ -157,6 +212,7 @@ export async function findServerByCode(code) {
 
 export const joinServer = (serverId, uid) => updateDoc(doc(db, 'servers', serverId), { members: arrayUnion(uid) });
 export const leaveServer = (serverId, uid) => updateDoc(doc(db, 'servers', serverId), { members: arrayRemove(uid) });
+export const setServerIcon = (id, icon) => updateDoc(doc(db, 'servers', id), { icon: icon || null });
 export const renameServer = (id, name) => updateDoc(doc(db, 'servers', id), { name: name.slice(0, 40) });
 export const resetServerCode = (id) => updateDoc(doc(db, 'servers', id), { code: newCode() });
 export async function deleteServer(id) {
