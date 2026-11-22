@@ -118,7 +118,8 @@ export function createMusicBot(ctx) {
     host.hb = setInterval(() => {
       save({ at: Date.now() });
       // travou carregando (vídeo bloqueado, sem internet): pula
-      if (host && host.loadingSince && Date.now() - host.loadingSince > 25_000) {
+      // (anúncio e pausa não contam como "travado")
+      if (host && host.loadingSince && !host.state.ad && !host.state.paused && Date.now() - host.loadingSince > 25_000) {
         reply(null, `⚠️ "${host.state.now?.title || 'música'}" não carregou. Pulando...`);
         playNext();
       }
@@ -270,6 +271,7 @@ export function createMusicBot(ctx) {
     }
     if (p.ended && s.now) return playNext();
     if (p.ad !== s.ad) save({ ad: p.ad });
+    if (p.ad && host.loadingSince) host.loadingSince = Date.now(); // anúncio: zera o relógio do "travou"
     if (!s.now || p.ad) return;
     if (p.t > 0.5) host.loadingSince = 0;
     // mantém a barra de progresso de todo mundo certinha

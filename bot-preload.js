@@ -4,6 +4,7 @@ const { ipcRenderer } = require('electron');
 
 let lastEnded = false;
 let lastErr = '';
+let adMuted = false;
 
 function video() {
   return document.querySelector('#movie_player video') || document.querySelector('video');
@@ -15,10 +16,22 @@ function report() {
   const ad = !!(player && (player.classList.contains('ad-showing') || player.classList.contains('ad-interrupting')));
   const errEl = document.querySelector('.ytp-error, .ytp-error-content-wrap-reason');
   const err = errEl && errEl.offsetParent !== null ? (errEl.textContent || 'erro').trim().slice(0, 120) : '';
-  // pula anúncio quando aparece o botão
-  if (ad) {
-    const skip = document.querySelector('.ytp-skip-ad-button, .ytp-ad-skip-button, .ytp-ad-skip-button-modern');
+  // anúncio: fica mudo (ninguém na call escuta), acelera até o fim e clica em "Pular"
+  if (ad && v) {
+    if (!adMuted) {
+      adMuted = true;
+      v.muted = true;
+    }
+    try {
+      v.playbackRate = 16;
+      if (isFinite(v.duration) && v.duration > 0 && v.currentTime < v.duration - 0.3) v.currentTime = v.duration - 0.1;
+    } catch (_) {}
+    const skip = document.querySelector('.ytp-skip-ad-button, .ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-ad-skip-button-container button');
     if (skip) skip.click();
+  } else if (adMuted && v) {
+    adMuted = false;
+    v.muted = false;
+    v.playbackRate = 1;
   }
   const ended = !!(v && v.ended && !ad);
   const s = {
@@ -34,7 +47,7 @@ function report() {
   if (err) lastErr = err;
   ipcRenderer.send('botwin:state', s);
 }
-setInterval(report, 500);
+setInterval(report, 250);
 
 ipcRenderer.on('botwin:ctl', (_e, c) => {
   const v = video();

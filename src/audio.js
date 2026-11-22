@@ -1,5 +1,20 @@
 // Áudio: pipeline do microfone (ruído, gate, ganho) e saída (vozes, tela, soundboard)
 
+import { RnnoiseWorkletNode, loadRnnoise } from '@sapphi-red/web-noise-suppressor';
+
+// RNNoise: rede neural pequena que separa voz de ruído (teclado, mouse, ventilador), inclusive durante a fala
+let rnWasm = null;
+const rnBinary = () =>
+  (rnWasm =
+    rnWasm ||
+    loadRnnoise({
+      url: new URL('./rnnoise/rnnoise.wasm', import.meta.url).href,
+      simdUrl: new URL('./rnnoise/rnnoise_simd.wasm', import.meta.url).href,
+    }).catch((e) => {
+      rnWasm = null;
+      throw e;
+    }));
+
 const dbFromRms = (rms) => (rms > 0 ? 20 * Math.log10(rms) : -100);
 
 function rmsOf(analyser, buf) {
@@ -16,11 +31,15 @@ export class MicPipeline {
     this.dest = this.ctx.createMediaStreamDestination();
     this.inGain = this.ctx.createGain();
     this.analyser = this.ctx.createAnalyser();
-    this.analyser.fftSize = 1024;
+    this.analyser.fftSize = 512;
     this.gate = this.ctx.createGain();
     this.gate.gain.value = 0;
     this.inGain.connect(this.analyser);
-    this.inGain.connect(this.gate);
+    // atraso pequeno no áudio enviado: o filtro decide olhando 40 ms "à frente" e não corta o começo da fala
+    this.lookahead = this.ctx.createDelay(0.2);
+    this.lookahead.delayTime.value = 0.04;
+    this.inGain.connect(this.lookahead);
+    this.lookahead.connect(this.gate);
     // mudo separado do gate: o monitor escuta antes do mudo, os amigos escutam depois
     this.muteGain = this.ctx.createGain();
     this.muteGain.gain.value = 1;
@@ -39,8 +58,10 @@ export class MicPipeline {
     this.db = -100;
     this.speaking = false;
     this.lastOpen = 0;
+    this.above = 0;
+    this.floor = null;
     this.onSpeaking = null;
-    this.timer = setInterval(() => this.tick(), 20);
+    this.timer = setInterval(() => this.tick(), 10);
   }
 
   /** Track estável enviada aos peers (não muda ao trocar de microfone). */
@@ -90,11 +111,44 @@ export class MicPipeline {
     this.stopRaw();
     this.raw = raw;
     this.src = this.ctx.createMediaStreamSource(raw);
-    this.src.connect(this.inGain);
+    await this.chain();
     this.applyGain();
   }
 
+  // microfone -> [RNNoise] -> ganho/gate
+  async chain() {
+    if (!this.src) return;
+    try { this.src.disconnect(); } catch (_) {}
+    if (this.denoise) {
+      try { this.denoise.disconnect(); this.denoise.destroy(); } catch (_) {}
+      this.denoise = null;
+    }
+    this.denoiseOn = false;
+    if (this.settings.aiNoise) {
+      try {
+        const bin = await rnBinary();
+        if (!this.workletReady) {
+          await this.ctx.audioWorklet.addModule(new URL('./rnnoise/workletProcessor.js', import.meta.url).href);
+          this.workletReady = true;
+        }
+        if (!this.src) return;
+        this.denoise = new RnnoiseWorkletNode(this.ctx, { maxChannels: 1, wasmBinary: bin });
+        this.src.connect(this.denoise);
+        this.denoise.connect(this.inGain);
+        this.denoiseOn = true;
+        return;
+      } catch (e) {
+        console.warn('rnnoise', e);
+      }
+    }
+    this.src.connect(this.inGain);
+  }
+
   stopRaw() {
+    if (this.denoise) {
+      try { this.denoise.disconnect(); this.denoise.destroy(); } catch (_) {}
+      this.denoise = null;
+    }
     if (this.src) {
       try { this.src.disconnect(); } catch (_) {}
       this.src = null;
@@ -114,6 +168,7 @@ export class MicPipeline {
       prev.noiseSuppression !== settings.noiseSuppression ||
       prev.autoGainControl !== settings.autoGainControl;
     if (restart && this.raw) await this.start();
+    else if (prev.aiNoise !== settings.aiNoise) await this.chain();
     this.applyGain();
   }
 
@@ -140,13 +195,22 @@ export class MicPipeline {
     const s = this.settings;
     this.db = dbFromRms(rmsOf(this.analyser, this.buf));
     const now = performance.now();
-    const threshold = s.gateEnabled ? s.gateThreshold : -60;
-    if (this.db > threshold) this.lastOpen = now;
-    const open = s.gateEnabled ? now - this.lastOpen < 280 : true;
+    // nível do ruído do ambiente: desce rápido, sobe devagar (a fala tem pausas, então ele não "aprende" a voz)
+    if (this.floor == null || this.db < this.floor) this.floor = this.floor == null ? this.db : this.floor * 0.6 + this.db * 0.4;
+    else this.floor = Math.min(-35, this.floor + 0.02);
+    // filtro automático: liga junto com a supressão inteligente (se o manual estiver desligado)
+    const auto = s.aiNoise && !s.gateEnabled;
+    const gateOn = s.gateEnabled || auto;
+    const threshold = s.gateEnabled ? s.gateThreshold : auto ? Math.max(-50, Math.min(-32, this.floor + 12)) : -60;
+    this.autoThreshold = threshold;
+    // voz é contínua; tecla/clique é um estalo curto: só abre com 40 ms seguidos acima do limite
+    this.above = this.db > threshold ? this.above + 1 : 0;
+    if (this.above >= (gateOn ? 4 : 1)) this.lastOpen = now;
+    const open = gateOn ? now - this.lastOpen < 320 : true;
     const t = this.ctx.currentTime;
     this.gate.gain.setTargetAtTime(open ? 1 : 0, t, open ? 0.004 : 0.06);
     this.muteGain.gain.setTargetAtTime(this.muted ? 0 : 1, t, 0.01);
-    const speaking = !this.muted && now - this.lastOpen < 280;
+    const speaking = !this.muted && now - this.lastOpen < 320;
     if (speaking !== this.speaking) {
       this.speaking = speaking;
       if (this.onSpeaking) this.onSpeaking(speaking);

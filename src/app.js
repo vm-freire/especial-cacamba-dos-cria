@@ -43,7 +43,8 @@ const DEFAULTS = {
   noiseSuppression: false,
   autoGainControl: false,
   gateEnabled: false,
-  settingsVersion: 3,
+  aiNoise: true,
+  settingsVersion: 4,
   gateThreshold: -50,
   quality: '1080p60',
   mode: 'motion',
@@ -70,6 +71,12 @@ if ((S.settingsVersion || 1) < 2) {
 }
 if (S.settingsVersion < 3) {
   Object.assign(S, { shareAudio: true, settingsVersion: 3 });
+  try {
+    localStorage.setItem('cacamba.settings', JSON.stringify(S));
+  } catch (_) {}
+}
+if (S.settingsVersion < 4) {
+  Object.assign(S, { aiNoise: true, settingsVersion: 4 });
   try {
     localStorage.setItem('cacamba.settings', JSON.stringify(S));
   } catch (_) {}
@@ -123,6 +130,7 @@ const st = {
   botServer: null,
   botUnsub: null,
   ephemeral: [], // avisos que só eu vejo no chat
+  botRunsOpen: new Set(), // blocos de conversa do bot que eu abri
   pendingFiles: [], // anexos esperando enviar
   musResults: [],
 };
@@ -1704,7 +1712,35 @@ function renderMessages() {
   let prev = null;
   const eph = st.ephemeral.filter((e) => e.ch === ch.id);
   const all = [...st.msgs, ...eph.map((e) => ({ ...e, eph: true, bot: true, id: '' }))].sort((a, b) => a.time - b.time);
-  for (const m of all) {
+  // conversa do bot (respostas + comandos digitados) fica recolhida: só a última aparece
+  const isBotTalk = (m) => !m.eph && (m.bot || (!m.files?.length && m.text && !!parseCommand(m.text)));
+  const hidden = new Set();
+  const runHead = new Map(); // índice da última msg do bloco -> { key, count, open }
+  for (let i = 0; i < all.length; ) {
+    if (!isBotTalk(all[i])) {
+      i++;
+      continue;
+    }
+    let j = i;
+    while (j + 1 < all.length && isBotTalk(all[j + 1])) j++;
+    if (j > i) {
+      const key = all[i].id || String(all[i].time);
+      const open = st.botRunsOpen.has(key);
+      if (!open) for (let k = i; k < j; k++) hidden.add(k);
+      runHead.set(open ? i : j, { key, count: j - i, open });
+    }
+    i = j + 1;
+  }
+  for (let i = 0; i < all.length; i++) {
+    const m = all[i];
+    if (hidden.has(i)) continue;
+    const run = runHead.get(i);
+    if (run) {
+      html += `<button class="bot-more" data-act="bot-more" data-key="${esc(run.key)}">${icon('music', 'sm')}<span>${
+        run.open ? '▾ Esconder a conversa com o bot' : `▸ ${run.count} ${run.count === 1 ? 'mensagem anterior' : 'mensagens anteriores'} do bot`
+      }</span></button>`;
+      prev = null;
+    }
     const who = m.bot ? 'bot' : m.uid;
     const grouped = prev && prev.who === who && !m.eph && !prev.eph && m.time - prev.time < 5 * 60_000;
     const mem = m.bot ? null : st.members.get(m.uid);
@@ -2343,11 +2379,12 @@ async function openSettings(tab = settingsTab) {
       <div class="toggle"><div class="t"><b>Ouvir meu microfone</b><small>Escuta sua própria voz (já com o filtro de ruído) pra testar. Use fone, senão dá microfonia. Ninguém mais escuta.</small></div>
         <button class="switch ${mic && mic.monitoring ? 'on' : ''}" data-act="toggle-monitor"></button></div>
       <div class="label">Processamento de voz</div>
-      <div class="hint" style="margin-bottom:4px">Vem tudo desligado pra voz sair limpa, sem cortes. Liga só o que precisar (ex.: ventilador ou teclado barulhento → supressão de ruído).</div>
-      ${sw('noiseSuppression', 'Supressão de ruído', 'Remove ventilador, teclado, barulho de fundo.')}
+      <div class="hint" style="margin-bottom:4px">A supressão inteligente já vem ligada. O resto vem desligado pra voz sair limpa: liga só se precisar.</div>
+      ${sw('aiNoise', 'Supressão de ruído inteligente (IA) — recomendado', 'Tira teclado, mouse, ventilador e barulho de fundo, até enquanto você fala. Funciona sozinho, sem ajustar nada.')}
+      ${sw('noiseSuppression', 'Supressão de ruído do Windows/Chromium', 'Filtro básico extra. Normalmente não precisa com a de IA ligada.')}
       ${sw('echoCancellation', 'Cancelamento de eco', 'Evita que seus amigos se escutem pelo seu microfone.')}
       ${sw('autoGainControl', 'Ganho automático', 'Ajusta seu volume sozinho (desliga se seu volume ficar oscilando).')}
-      ${sw('gateEnabled', 'Filtro de ruído (noise gate)', 'Só transmite quando você fala acima do limite.')}
+      ${sw('gateEnabled', 'Filtro de ruído (noise gate)', 'Limite fixo escolhido por você. Desligado, a supressão inteligente já usa um filtro automático que ignora teclas e cliques.')}
       <div class="label">Sensibilidade do filtro — <span data-show="gateThreshold">${S.gateThreshold}</span> dB</div>
       <input type="range" min="-80" max="-10" value="${S.gateThreshold}" data-set-num="gateThreshold"/>
       <div class="label">Outros</div>
@@ -2486,7 +2523,7 @@ async function openSettings(tab = settingsTab) {
       if (!$('#mic-meter')) return;
       if (bar && mic) {
         bar.style.width = mic.level * 100 + '%';
-        bar.style.opacity = mic.speaking || !S.gateEnabled ? 1 : 0.35;
+        bar.style.opacity = mic.speaking || !(S.gateEnabled || S.aiNoise) ? 1 : 0.35;
       }
       meterRaf = requestAnimationFrame(loop);
     };
@@ -2977,6 +3014,16 @@ document.addEventListener('click', async (e) => {
     case 'attach':
       pickAttachments();
       break;
+    case 'bot-more': {
+      const k = b.dataset.key;
+      if (st.botRunsOpen.has(k)) st.botRunsOpen.delete(k);
+      else st.botRunsOpen.add(k);
+      const box = $('#msgs');
+      const keep = box ? box.scrollHeight - box.scrollTop : 0;
+      renderMessages();
+      if (box) box.scrollTop = box.scrollHeight - keep;
+      break;
+    }
     case 'unattach':
       st.pendingFiles.splice(+b.dataset.i, 1);
       renderPending();
