@@ -175,7 +175,8 @@ export class MicPipeline {
       numberOfOutputs: 1,
       outputChannelCount: [1],
       processorOptions: {
-        params: { ativo: true, tom: 0, escala: 'menor', velocidade: 0, intensidade: 1, transpor: 0, voz: 'media', ganhoEntrada: 1, volume: 1, reducaoRuido: 0.6 },
+        // os ajustes que o Igão usa no app dele: trap pesado, +1 semitom, ganho +10 dB, volume +12 dB, redução 100%
+        params: { ativo: true, tom: 0, escala: 'menor', velocidade: 0, intensidade: 1, transpor: 1, voz: 'media', ganhoEntrada: 3.1623, volume: 3.9811, reducaoRuido: 1 },
       },
     });
     const graves = ctx.createBiquadFilter();
@@ -226,7 +227,17 @@ export class MicPipeline {
     sat.connect(envioDelay).connect(atraso).connect(escuro);
     escuro.connect(volta).connect(atraso);
     escuro.connect(mix);
-    return { input: motor, output: mix, nodes: [motor, graves, brilho, sat, mix, envioReverb, conv, envioDelay, atraso, escuro, volta] };
+    // limitador no fim: com o ganho alto do Igão, reverb + delay somados passariam de 0 dB e estourariam
+    const nivel = ctx.createGain();
+    nivel.gain.value = 0.8;
+    const limite = ctx.createDynamicsCompressor();
+    limite.threshold.value = -4;
+    limite.knee.value = 2;
+    limite.ratio.value = 20;
+    limite.attack.value = 0.002;
+    limite.release.value = 0.12;
+    mix.connect(nivel).connect(limite);
+    return { input: motor, output: limite, nodes: [motor, graves, brilho, sat, mix, envioReverb, conv, envioDelay, atraso, escuro, volta, nivel, limite] };
   }
 
   stopRaw() {
@@ -288,7 +299,8 @@ export class MicPipeline {
     // voz é contínua; tecla/clique é um estalo curto: só abre com 40 ms seguidos acima do limite
     this.above = this.db > threshold ? this.above + 1 : 0;
     if (this.above >= (gateOn ? 4 : 1)) this.lastOpen = now;
-    const open = gateOn ? now - this.lastOpen < 320 : true;
+    // com filtro de voz o fim do reverb/delay precisa passar, então o portão demora mais pra fechar
+    const open = gateOn ? now - this.lastOpen < (this.filter ? 900 : 320) : true;
     const t = this.ctx.currentTime;
     this.gate.gain.setTargetAtTime(open ? 1 : 0, t, open ? 0.004 : 0.06);
     this.muteGain.gain.setTargetAtTime(this.muted ? 0 : 1, t, 0.01);
