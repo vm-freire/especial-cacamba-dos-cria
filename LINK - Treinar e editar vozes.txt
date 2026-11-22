@@ -1,0 +1,29 @@
+ESPECIAL CAÇAMBA DOS CRIA - VOZES COM IA
+========================================
+
+1) TREINAR UMA VOZ NOVA (a partir de MP3, vídeo, etc.)
+   Link do Colab:
+   https://colab.research.google.com/github/vm-freire/especial-cacamba-dos-cria/blob/main/colab/treinar-voz.ipynb
+
+   - Entre com a conta Google.
+   - Menu: Ambiente de execução > Alterar o tipo de ambiente > GPU T4 > Salvar.
+   - Clique no play de cada passo, de cima pra baixo, esperando um terminar antes do próximo.
+   - Se aparecer o aviso de que o notebook não é do Google, clique em "Executar mesmo assim".
+   - Passo 2: escolha os áudios (de 10 a 30 min de fala é o ideal).
+   - Passo 3: marque "separar voz" se tiver música ou barulho no fundo.
+   - Passo 4: treina (de 30 min a 2 h). Fica uma cópia em Meu Drive / Vozes Caçamba.
+   - Passo 5: testa a voz e baixa o arquivo .pth.
+
+2) PUBLICAR A VOZ NO APP (Estúdio de Vozes)
+   - Abra o atalho "Estúdio de Vozes" na área de trabalho.
+   - + Nova voz > nome, foto > Carregar modelo (o .pth baixado) > teste > Publicar no Caçamba.
+   - Precisa da senha de publicação (só você tem).
+
+   Em outro PC:
+   - Instale o Node.js: https://nodejs.org
+   - Baixe o repositório: https://github.com/vm-freire/especial-cacamba-dos-cria
+     (botão verde "Code" > "Download ZIP" e extraia)
+   - Rode estudio\Instalar Estudio.cmd (ele cria o atalho na área de trabalho).
+
+3) REPOSITÓRIO NO GITHUB
+   https://github.com/vm-freire/especial-cacamba-dos-cria
