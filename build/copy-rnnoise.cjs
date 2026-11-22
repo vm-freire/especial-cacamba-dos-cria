@@ -6,3 +6,8 @@ const out = path.join(__dirname, '..', 'dist', 'rnnoise');
 fs.mkdirSync(out, { recursive: true });
 fs.copyFileSync(path.join(src, 'rnnoise', 'workletProcessor.js'), path.join(out, 'workletProcessor.js'));
 for (const f of ['rnnoise.wasm', 'rnnoise_simd.wasm']) fs.copyFileSync(path.join(src, f), path.join(out, f));
+
+// motor do autotune (filtro de voz "Autotune")
+const at = path.join(__dirname, '..', 'dist', 'autotune');
+fs.mkdirSync(at, { recursive: true });
+fs.copyFileSync(path.join(__dirname, '..', 'src', 'vendor', 'autotune-igao', 'autotune-processor.js'), path.join(at, 'autotune-processor.js'));

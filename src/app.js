@@ -44,6 +44,7 @@ const DEFAULTS = {
   autoGainControl: false,
   gateEnabled: false,
   aiNoise: true,
+  voiceFilter: '', // '' = voz normal, 'autotune'
   settingsVersion: 4,
   gateThreshold: -50,
   quality: '1080p60',
@@ -1468,6 +1469,7 @@ function renderUserPanel() {
     const sv = st.servers.find((x) => x.id === st.roomServerId);
     cb.innerHTML = st.roomId
       ? `<div class="callbar"><div class="grow"><b>Voz conectada</b><small class="ellipsis">${esc(st.roomName)} / ${esc(sv ? sv.name : '')}</small></div>
+         <button class="ibtn ${S.voiceFilter ? 'fx-on' : ''}" data-act="voice-fx" title="${S.voiceFilter ? 'Filtro de voz: Autotune' : 'Filtros de voz'}">${icon('fx')}</button>
          <button class="ibtn" data-act="go-call" title="Ir para a chamada">${icon('voice')}</button>
          <button class="ibtn off" data-act="leave" title="Desconectar">${icon('hangup')}</button></div>`
       : '';
@@ -2787,6 +2789,47 @@ function serverMenu(btn) {
 }
 
 // ---------------------------------------------------------------- menus de contexto
+// filtros de voz: um clique e já sai com o efeito (todo mundo da call escuta)
+const VOICE_FX = [
+  { id: '', name: 'Voz normal' },
+  { id: 'autotune', name: 'Autotune' },
+];
+async function setVoiceFilter(id) {
+  S.voiceFilter = id;
+  saveSettings();
+  if (!mic) await ensureMic();
+  if (mic) await mic.update({ ...S });
+  renderUserPanel();
+  toast(id ? `Filtro ligado: ${VOICE_FX.find((f) => f.id === id).name}` : 'Voz normal de volta');
+}
+function voiceFxMenu(x, y) {
+  const c = openCtx(
+    x,
+    y,
+    `<div class="ctx-title">${icon('fx', 'sm')} Filtros de voz</div>
+     ${VOICE_FX.map((f) => `<button class="item ${S.voiceFilter === f.id ? 'on' : ''}" data-fx="${f.id}">${S.voiceFilter === f.id ? '✓ ' : ''}${f.name}</button>`).join('')}
+     <div class="ctx-sep"></div>
+     <button class="item" data-fx-mon="1">${mic && mic.monitoring ? '✓ ' : ''}Me ouvir (retorno no fone)</button>
+     <div class="ctx-sub">Use fone pra não dar microfonia.</div>`
+  );
+  // sobe o menu pra cima do botão
+  const h = c.getBoundingClientRect().height;
+  c.style.top = Math.max(8, y - h) + 'px';
+  c.addEventListener('click', async (ev) => {
+    const f = ev.target.closest('[data-fx]');
+    if (f) {
+      closeCtx();
+      return setVoiceFilter(f.dataset.fx);
+    }
+    if (ev.target.closest('[data-fx-mon]')) {
+      closeCtx();
+      if (!mic) await ensureMic();
+      if (mic) await mic.setMonitor(!mic.monitoring, S.outputDevice);
+      toast(mic && mic.monitoring ? 'Retorno ligado: você está se ouvindo.' : 'Retorno desligado.');
+    }
+  });
+}
+
 // botão direito no Caçamba Bot: volume dele só pra mim + controles
 function botMenu(e) {
   const b = botHere();
@@ -3264,6 +3307,12 @@ document.addEventListener('click', async (e) => {
       isFullscreen = await bridge.setFullscreen();
       renderFsButton();
       break;
+    case 'voice-fx': {
+      e.stopPropagation();
+      const r = b.getBoundingClientRect();
+      voiceFxMenu(r.left, r.top - 8);
+      break;
+    }
     case 'toggle-monitor': {
       if (!mic) await ensureMic();
       if (!mic) break;

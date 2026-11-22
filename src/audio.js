@@ -115,14 +115,12 @@ export class MicPipeline {
     this.applyGain();
   }
 
-  // microfone -> [RNNoise] -> ganho/gate
+  // microfone -> [RNNoise] -> [filtro de voz] -> ganho/gate
   async chain() {
     if (!this.src) return;
     try { this.src.disconnect(); } catch (_) {}
-    if (this.denoise) {
-      try { this.denoise.disconnect(); this.denoise.destroy(); } catch (_) {}
-      this.denoise = null;
-    }
+    this.dropNodes();
+    let node = this.src;
     this.denoiseOn = false;
     if (this.settings.aiNoise) {
       try {
@@ -133,22 +131,106 @@ export class MicPipeline {
         }
         if (!this.src) return;
         this.denoise = new RnnoiseWorkletNode(this.ctx, { maxChannels: 1, wasmBinary: bin });
-        this.src.connect(this.denoise);
-        this.denoise.connect(this.inGain);
+        node.connect(this.denoise);
+        node = this.denoise;
         this.denoiseOn = true;
-        return;
       } catch (e) {
         console.warn('rnnoise', e);
       }
     }
-    this.src.connect(this.inGain);
+    if (this.settings.voiceFilter === 'autotune') {
+      try {
+        this.filter = await this.makeAutotune();
+        if (!this.src) return;
+        node.connect(this.filter.input);
+        node = this.filter.output;
+      } catch (e) {
+        console.warn('autotune', e);
+        this.filter = null;
+      }
+    }
+    node.connect(this.inGain);
   }
 
-  stopRaw() {
+  dropNodes() {
     if (this.denoise) {
       try { this.denoise.disconnect(); this.denoise.destroy(); } catch (_) {}
       this.denoise = null;
     }
+    if (this.filter) {
+      for (const n of this.filter.nodes) try { n.disconnect(); } catch (_) {}
+      this.filter = null;
+    }
+  }
+
+  // "Autotune": o padrão do Autotune Igão (estilo trap) — motor + brilho, saturação, reverb e delay
+  async makeAutotune() {
+    const ctx = this.ctx;
+    if (!this.autotuneReady) {
+      await ctx.audioWorklet.addModule(new URL('./autotune/autotune-processor.js', import.meta.url).href);
+      this.autotuneReady = true;
+    }
+    const motor = new AudioWorkletNode(ctx, 'autotune-igao', {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [1],
+      processorOptions: {
+        params: { ativo: true, tom: 0, escala: 'menor', velocidade: 0, intensidade: 1, transpor: 0, voz: 'media', ganhoEntrada: 1, volume: 1, reducaoRuido: 0.6 },
+      },
+    });
+    const graves = ctx.createBiquadFilter();
+    graves.type = 'highpass';
+    graves.frequency.value = 90;
+    const brilho = ctx.createBiquadFilter();
+    brilho.type = 'highshelf';
+    brilho.frequency.value = 3500;
+    brilho.gain.value = 5;
+    const sat = ctx.createWaveShaper();
+    const curva = new Float32Array(1024);
+    for (let i = 0; i < 1024; i++) {
+      const x = (i / 1023) * 2 - 1;
+      curva[i] = Math.tanh(1.6 * x) / Math.tanh(1.6);
+    }
+    sat.curve = curva;
+    const mix = ctx.createGain();
+    motor.connect(graves).connect(brilho).connect(sat).connect(mix);
+    // reverb 25%
+    const envioReverb = ctx.createGain();
+    envioReverb.gain.value = 0.25 * 0.7;
+    const conv = ctx.createConvolver();
+    const sr = ctx.sampleRate;
+    const n = Math.round(sr * 1.8);
+    const pre = Math.round(sr * 0.02);
+    const ir = ctx.createBuffer(2, n, sr);
+    for (let c = 0; c < 2; c++) {
+      const d = ir.getChannelData(c);
+      let lp = 0;
+      for (let i = pre; i < n; i++) {
+        const t = (i - pre) / sr;
+        lp += (Math.random() * 2 - 1 - lp) * (0.35 - 0.25 * (t / 1.8));
+        d[i] = lp * Math.exp(-3.2 * t);
+      }
+    }
+    conv.buffer = ir;
+    sat.connect(envioReverb).connect(conv).connect(mix);
+    // delay 20% (240 ms, com repetição)
+    const envioDelay = ctx.createGain();
+    envioDelay.gain.value = 0.2 * 0.55;
+    const atraso = ctx.createDelay(1);
+    atraso.delayTime.value = 0.24;
+    const escuro = ctx.createBiquadFilter();
+    escuro.type = 'lowpass';
+    escuro.frequency.value = 3200;
+    const volta = ctx.createGain();
+    volta.gain.value = 0.35;
+    sat.connect(envioDelay).connect(atraso).connect(escuro);
+    escuro.connect(volta).connect(atraso);
+    escuro.connect(mix);
+    return { input: motor, output: mix, nodes: [motor, graves, brilho, sat, mix, envioReverb, conv, envioDelay, atraso, escuro, volta] };
+  }
+
+  stopRaw() {
+    this.dropNodes();
     if (this.src) {
       try { this.src.disconnect(); } catch (_) {}
       this.src = null;
@@ -168,7 +250,7 @@ export class MicPipeline {
       prev.noiseSuppression !== settings.noiseSuppression ||
       prev.autoGainControl !== settings.autoGainControl;
     if (restart && this.raw) await this.start();
-    else if (prev.aiNoise !== settings.aiNoise) await this.chain();
+    else if (prev.aiNoise !== settings.aiNoise || prev.voiceFilter !== settings.voiceFilter) await this.chain();
     this.applyGain();
   }
 

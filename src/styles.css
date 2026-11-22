@@ -550,3 +550,6 @@ body.fs #fs-btn { display: none; }
 .bot-more { display: flex; align-items: center; gap: 6px; margin: 8px 0 2px 16px; padding: 3px 10px; border-radius: 12px; font-size: 12px; color: var(--muted); background: var(--bg3); width: fit-content; }
 .bot-more:hover { color: var(--text); background: var(--bg4); }
 .bot-more .icon { color: #ffb21e; }
+/* filtro de voz ligado */
+.ibtn.fx-on { color: #ffb21e; background: rgba(255,178,30,.14); }
+.ctx .item.on { color: #ffb21e; }
