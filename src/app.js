@@ -1102,7 +1102,9 @@ function openUploadSound() {
   const input = document.createElement('input');
   input.type = 'file';
   input.accept = 'audio/*,.mp3,.wav,.ogg,.m4a';
+  input.multiple = true;
   input.onchange = async () => {
+    if (input.files.length > 1) return openBatchSounds(sv, [...input.files]);
     const file = input.files[0];
     if (!file) return;
     if (file.size > 700 * 1024) return toast('Arquivo muito grande (máx. 700 KB). Corta o áudio antes ou usa um MP3 menor.', true);
@@ -1190,6 +1192,118 @@ function openUploadSound() {
     });
   };
   input.click();
+}
+
+// vários sons de uma vez: cada um com nome e capa; os longos tocam os primeiros 30 s (dá pra cortar depois)
+async function openBatchSounds(sv, files) {
+  const svName = st.servers.find((x) => x.id === sv)?.name || '';
+  const items = files.slice(0, 30).map((file) => ({ file, name: file.name.replace(/\.[^.]+$/, '').slice(0, 40), state: 'lendo' }));
+  if (files.length > 30) toast('Máximo de 30 sons por vez: peguei os 30 primeiros.');
+  const m = openModal(
+    `<div class="modal-head"><h3>${items.length} sons novos em ${esc(svName)}</h3><button class="ibtn" data-act="close">${icon('close')}</button></div>
+     <div class="modal-body"><div class="batch-list" id="batch-list"></div>
+       <div class="hint">Dá pra mudar o nome de cada um aqui. Áudio maior que 30 s toca só os primeiros 30 s: depois é só clicar com o botão direito no som → Cortar áudio pra escolher outro pedaço.</div></div>
+     <div class="modal-foot"><span class="muted grow" id="batch-sum"></span><button class="btn ghost" data-act="close">Cancelar</button><button class="btn primary" id="batch-save" disabled>${icon('upload', 'sm')} Enviar todos</button></div>`,
+    { wide: true }
+  );
+  const list = $('#batch-list', m);
+  const row = (it, i) => `
+    <div class="batch-row ${it.state === 'erro' ? 'bad' : ''}" data-i="${i}">
+      <div class="batch-cover">${soundIcon({ img: it.img })}</div>
+      <input type="text" maxlength="40" value="${esc(it.name)}" data-bname="${i}" ${it.state === 'erro' || it.state === 'ok' ? 'disabled' : ''}/>
+      <span class="batch-info">${
+        it.state === 'lendo'
+          ? 'Lendo...'
+          : it.state === 'erro'
+            ? esc(it.err)
+            : it.state === 'enviando'
+              ? 'Enviando...'
+              : it.state === 'ok'
+                ? '✓ Enviado'
+                : `${it.dur.toFixed(1)}s${it.dur > 30 ? ' (toca 30s)' : ''} · ${Math.round(it.file.size / 1024)} KB`
+      }</span>
+      <button class="ibtn" data-bplay="${i}" title="Ouvir" ${it.buf ? '' : 'disabled'}>${icon('play', 'sm')}</button>
+      <button class="ibtn" data-brm="${i}" title="Tirar da lista" ${it.state === 'ok' || it.state === 'enviando' ? 'disabled' : ''}>${icon('close', 'sm')}</button>
+    </div>`;
+  const draw = () => {
+    list.innerHTML = items.map((it, i) => (it.removed ? '' : row(it, i))).join('');
+    const ready = items.filter((it) => !it.removed && it.state === 'pronto');
+    const btn = $('#batch-save', m);
+    if (btn) btn.disabled = !ready.length || items.some((it) => it.state === 'lendo' || it.state === 'enviando');
+    const sum = $('#batch-sum', m);
+    if (sum) sum.textContent = `${ready.length} pronto(s) pra enviar`;
+  };
+  draw();
+  list.addEventListener('input', (e) => {
+    const i = e.target.dataset.bname;
+    if (i != null) items[+i].name = e.target.value;
+  });
+  list.addEventListener('click', (e) => {
+    const pl = e.target.closest('[data-bplay]');
+    const rm = e.target.closest('[data-brm]');
+    if (pl) {
+      const it = items[+pl.dataset.bplay];
+      out.stopSounds();
+      out.playBuffer(it.buf, 100, 0, Math.min(it.dur, 30));
+    }
+    if (rm) {
+      items[+rm.dataset.brm].removed = true;
+      draw();
+    }
+  });
+  // lê os arquivos um por um (decodifica, acha a capa)
+  for (const it of items) {
+    if (it.file.size > 700 * 1024) {
+      Object.assign(it, { state: 'erro', err: 'Maior que 700 KB' });
+      draw();
+      continue;
+    }
+    try {
+      const ab = await it.file.arrayBuffer();
+      it.buf = await out.decode(ab.slice(0));
+      it.dur = it.buf.duration;
+      try {
+        const cover = id3Cover(ab);
+        if (cover) it.img = await squareThumb(cover);
+      } catch (_) {}
+      it.dataUrl = await readAsDataURL(it.file);
+      it.state = 'pronto';
+    } catch (_) {
+      Object.assign(it, { state: 'erro', err: 'Formato não suportado' });
+    }
+    if (!document.body.contains(list)) return; // fechou a janela
+    draw();
+  }
+  $('#batch-save', m).addEventListener('click', async () => {
+    out.stopSounds();
+    let ok = 0;
+    for (const it of items) {
+      if (it.removed || it.state !== 'pronto') continue;
+      it.state = 'enviando';
+      draw();
+      try {
+        await B.uploadSound({
+          uid: st.user.uid,
+          name: (it.name.trim() || 'Som').slice(0, 40),
+          emoji: '🔊',
+          dataUrl: it.dataUrl,
+          volume: 100,
+          serverId: sv,
+          img: it.img || null,
+          start: 0,
+          end: it.dur > 30 ? 30 : null,
+        });
+        it.state = 'ok';
+        ok++;
+      } catch (err) {
+        console.error(err);
+        Object.assign(it, { state: 'erro', err: 'Falhou: ' + B.friendlyError(err) });
+      }
+      draw();
+    }
+    toast(`${ok} som(ns) adicionado(s)!`);
+    if (items.every((it) => it.removed || it.state === 'ok')) closeModal();
+  });
 }
 
 async function openTrimSound(id) {
