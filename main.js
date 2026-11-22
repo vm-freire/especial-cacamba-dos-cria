@@ -183,6 +183,8 @@ function setupUpdater() {
     return;
   }
   autoUpdater.autoDownload = true;
+  // baixa o instalador inteiro (o modo "só a diferença" faz muitos pedacinhos e às vezes trava perto do fim)
+  autoUpdater.disableDifferentialDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
   autoUpdater.on('checking-for-update', () => setUpdate({ state: 'checking' }));
   autoUpdater.on('update-available', (info) => setUpdate({ state: 'available', version: info.version, percent: 0 }));

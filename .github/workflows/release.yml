@@ -21,14 +21,15 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run dist
-      # sobe os 3 arquivos que o auto-update precisa (instalador, blockmap, latest.yml) e confere
+      # sobe os 2 arquivos que o auto-update precisa (instalador e latest.yml) e confere
       - name: Publicar release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${GITHUB_REF_NAME}"
-          FILES="release/Especial-Cacamba-dos-Cria-Setup.exe release/Especial-Cacamba-dos-Cria-Setup.exe.blockmap release/latest.yml"
+          # sem o .blockmap: força as versões antigas a baixarem o arquivo inteiro (não trava)
+          FILES="release/Especial-Cacamba-dos-Cria-Setup.exe release/latest.yml"
           ls -la $FILES
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" $FILES --clobber
@@ -38,4 +39,4 @@ jobs:
           fi
           N=$(gh release view "$TAG" --json assets -q '.assets | length')
           echo "arquivos na release: $N"
-          test "$N" -ge 3
+          test "$N" -ge 2

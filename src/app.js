@@ -431,8 +431,26 @@ function onPresence(list) {
 const presenceOf = (sid) => st.presence.find((p) => p.sid === sid);
 const roomMembers = (roomId) => st.presence.filter((p) => p.roomId === roomId);
 
-function iceServers() {
-  const list = [
+// TURN (repetidor) vem do site na Vercel; guarda por 6h. Sem ele, só conexão direta.
+const TURN_URL = 'https://especial-cacamba.vercel.app/api/turn';
+let turnCache = { at: 0, list: [] };
+async function fetchTurn() {
+  if (Date.now() - turnCache.at < 6 * 3600_000 && turnCache.list.length) return turnCache.list;
+  try {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), 3500);
+    const r = await fetch(TURN_URL, { signal: ctl.signal, cache: 'no-store' });
+    clearTimeout(t);
+    const j = await r.json();
+    turnCache = { at: Date.now(), list: Array.isArray(j.iceServers) ? j.iceServers : [] };
+  } catch (e) {
+    console.warn('turn', e);
+  }
+  return turnCache.list;
+}
+
+function iceServers(extra = []) {
+  const list = [...extra,
     { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
     { urls: 'stun:stun.cloudflare.com:3478' },
   ];
@@ -478,7 +496,7 @@ async function joinRoom(roomId) {
   st.prevRoomSids = new Set();
   mesh = new Mesh({
     mySid: st.sid,
-    iceServers: iceServers(),
+    iceServers: iceServers(await fetchTurn()),
     codec: S.codec,
     micTrack: mic ? mic.track : null,
     signal: (to, data) => B.sendSignal(st.sid, to, data),
@@ -997,9 +1015,11 @@ function renderHead() {
   }
   const peers = Object.values(st.conn);
   const connecting = peers.filter((s) => s !== 'connected').length;
+  const failed = peers.some((s) => s === 'failed' || s === 'disconnected');
+  const waiting = peers.length && peers.every((s) => s === 'new');
   const n = roomMembers(st.roomId).length;
   el.innerHTML = `${icon('voice')}<h2>${esc(room.name)}</h2>
-    <span class="conn ${connecting ? 'warn' : ''}">${connecting ? `Conectando com ${connecting}...` : 'Voz conectada'} • ${n} na sala</span>
+    <span class="conn ${connecting ? 'warn' : ''}">${connecting ? (failed ? `Rede bloqueou a conexão com ${connecting}, tentando de novo...` : waiting ? `Esperando resposta de ${connecting}...` : `Conectando com ${connecting}...`) : 'Voz conectada'} • ${n} na sala</span>
     <div class="grow"></div>
     <button class="btn ghost" data-act="toggle-sb">${icon('sound', 'sm')} Soundboard</button>`;
 }
