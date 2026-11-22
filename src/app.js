@@ -1321,7 +1321,7 @@ function renderSidebar() {
         .map((r) => {
           const ms = roomMembers(r.id);
           return `<div class="room ${st.roomId === r.id && st.mode === 'stage' ? 'on' : ''} ${st.roomId === r.id ? 'joined' : ''}" data-act="join" data-room="${r.id}">${icon('voice', 'sm')}<span class="ellipsis">${esc(r.name)}</span>${ms.length ? `<span class="count">${ms.length}</span>` : ''}<button class="room-chat ${st.mode === 'chat' && currentText()?.id === r.id ? 'on' : ''}" data-act="open-text" data-room="${r.id}" title="Chat do canal ${esc(r.name)}">${icon('chat', 'sm')}</button></div>
-          ${ms.length ? `<div class="room-members">${ms.map((p) => `<div class="rm" data-sid="${p.sid}">${avatar(p.name, p.color, p.sid, '', p.uid)}<span class="ellipsis">${esc(p.name)}</span>${flags(p)}</div>`).join('')}${isBotActive(st.bot) && st.bot.roomId === r.id ? `<div class="rm bot-rm"><div class="avatar bot-av">${icon('music', 'sm')}</div><span class="ellipsis">Caçamba Bot</span><span class="bot-tag">BOT</span></div>` : ''}</div>` : ''}`;
+          ${ms.length ? `<div class="room-members">${ms.map((p) => `<div class="rm" data-sid="${p.sid}">${avatar(p.name, p.color, p.sid, '', p.uid)}<span class="ellipsis">${esc(p.name)}</span>${flags(p)}</div>`).join('')}${isBotActive(st.bot) && st.bot.roomId === r.id ? `<div class="rm bot-rm" title="Botão direito: volume e controles do bot"><div class="avatar bot-av">${icon('music', 'sm')}</div><span class="ellipsis">Caçamba Bot</span><span class="bot-tag">BOT</span></div>` : ''}</div>` : ''}`;
         })
         .join('')}
     </div>
@@ -2636,6 +2636,49 @@ function serverMenu(btn) {
 }
 
 // ---------------------------------------------------------------- menus de contexto
+// botão direito no Caçamba Bot: volume dele só pra mim + controles
+function botMenu(e) {
+  const b = botHere();
+  if (!b) return;
+  e.preventDefault();
+  const vol = S.botVolume ?? 70;
+  const c = openCtx(
+    e.clientX,
+    e.clientY,
+    `<div class="ctx-title">🎵 Caçamba Bot</div>
+     ${b.now ? `<div class="ctx-sub ellipsis">${esc(b.now.title)}</div>` : ''}
+     <div class="ctx-range"><small><span>Volume da música pra mim</span><span id="bv">${vol}%</span></small>
+     <input type="range" min="0" max="150" value="${vol}" id="bv-range"/></div>
+     <button class="item" data-x="mute">${vol === 0 ? 'Desmutar o bot pra mim' : 'Mutar o bot pra mim'}</button>
+     <button class="item" data-x="reset">Volume padrão (70%)</button>
+     <div class="ctx-sep"></div>
+     <button class="item" data-x="${b.paused ? 'resume' : 'pause'}">${b.paused ? 'Continuar' : 'Pausar'}</button>
+     <button class="item" data-x="skip">Pular música</button>
+     <button class="item" data-x="queue">Ver fila / pedir música</button>
+     <button class="item danger" data-x="stop">Parar e tirar o bot</button>`
+  );
+  const apply = (v) => {
+    if (v > 0) S.botVolumeLast = v;
+    S.botVolume = v;
+    saveSettings();
+    bot.setListenVolume(v);
+    $('#bv', c).textContent = v + '%';
+    $('#bv-range', c).value = v;
+    const mv = $('[data-botvol]');
+    if (mv) mv.value = v;
+  };
+  $('#bv-range', c).addEventListener('input', (ev) => apply(+ev.target.value));
+  c.addEventListener('click', (ev) => {
+    const x = ev.target.dataset.x;
+    if (!x) return;
+    if (x === 'mute') apply(vol === 0 ? S.botVolumeLast || 70 : 0);
+    else if (x === 'reset') apply(70);
+    else if (x === 'queue') openMusicModal();
+    else botCmd({ type: x, arg: '' });
+    closeCtx();
+  });
+}
+
 function personMenu(e, sid) {
   const p = presenceOf(sid);
   if (!p || sid === st.sid) return;
@@ -3129,6 +3172,7 @@ document.addEventListener('contextmenu', (e) => {
   if (snd) return soundMenu(e, snd.dataset.id);
   const msg = e.target.closest('.msg[data-id]');
   if (msg) return msgMenu(e, msg.dataset.id);
+  if (e.target.closest('.bot-rm, #botbar')) return botMenu(e);
   const room = e.target.closest('.room');
   if (room) return roomMenu(e, room.dataset.room);
   const who = e.target.closest('[data-sid]');

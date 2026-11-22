@@ -535,3 +535,6 @@ body.fs #fs-btn { display: none; }
 .tile video.cam.mirror { transform: scaleX(-1); }
 .grid.focus .focus-main .tile.has-cam video.cam { object-fit: contain; }
 .flags .icon { vertical-align: middle; }
+.ctx .ctx-sub { padding: 0 10px 8px; font-size: 11px; color: var(--muted); max-width: 240px; margin-top: -4px; }
+.ctx .ctx-sep { height: 1px; background: var(--bg4); margin: 4px 6px; }
+.bot-rm { cursor: context-menu; }
