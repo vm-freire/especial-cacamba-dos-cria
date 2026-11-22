@@ -120,7 +120,17 @@ export class MicPipeline {
     if (!this.src) return;
     try { this.src.disconnect(); } catch (_) {}
     this.dropNodes();
-    let node = this.src;
+    // junta o mic em mono antes dos filtros: muitos mics chegam em estéreo e o RNNoise só limpa o 1º canal,
+    // deixando o outro mudo (todo mundo escutava a pessoa de um lado só)
+    if (!this.mono) {
+      this.mono = this.ctx.createGain();
+      this.mono.channelCount = 1;
+      this.mono.channelCountMode = 'explicit';
+      this.mono.channelInterpretation = 'speakers';
+    }
+    try { this.mono.disconnect(); } catch (_) {}
+    this.src.connect(this.mono);
+    let node = this.mono;
     this.denoiseOn = false;
     if (this.settings.aiNoise) {
       try {
