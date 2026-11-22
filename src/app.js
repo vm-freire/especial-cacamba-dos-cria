@@ -942,30 +942,37 @@ function loadSound(id) {
   return soundCache.get(id);
 }
 
+// Um som por vez: enquanto um toca (seu ou de outra pessoa), cliques em outros são ignorados — sem fila.
+let sbLoading = false;
+const sbBusy = () => sbLoading || out.activeSounds.size > 0;
+
 async function playSound(id, fromName = null) {
   const snd = st.sounds.find((s) => s.id === id);
-  if (!snd) return;
+  if (!snd || sbBusy()) return false;
+  sbLoading = true; // reserva enquanto carrega
   try {
     const buf = await loadSound(id);
+    const len = Math.max(0.05, (snd.end && snd.end > (snd.start || 0) ? Math.min(snd.end, buf.duration) : buf.duration) - (snd.start || 0));
     out.playBuffer(buf, snd.volume ?? 100, snd.start || 0, snd.end || null);
+    sbLoading = false;
     const el = $(`.sound[data-id="${id}"]`);
     if (el) {
       el.classList.add('playing');
-      const len = (snd.end || buf.duration) - (snd.start || 0);
-      setTimeout(() => el.classList.remove('playing'), Math.min(len * 1000, 4000));
+      setTimeout(() => $(`.sound[data-id="${id}"]`)?.classList.remove('playing'), len * 1000);
     }
     if (fromName) sfxPop(`${fromName} tocou 🔊 ${snd.name}`);
+    return true;
   } catch (e) {
+    sbLoading = false;
     console.error(e);
+    return false;
   }
 }
 
 function clickSound(id) {
-  const now = Date.now();
-  if (now - lastSfx < 250) return;
-  lastSfx = now;
-  playSound(id);
+  if (sbBusy()) return;
   if (mesh) mesh.broadcast({ t: 'sound', id });
+  playSound(id);
 }
 
 function sfxPop(text) {
