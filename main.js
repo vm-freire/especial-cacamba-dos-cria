@@ -8,8 +8,11 @@ const {
   globalShortcut,
   shell,
   Menu,
+  Tray,
+  nativeImage,
 } = require('electron');
 const path = require('path');
+const fs = require('fs');
 
 let autoUpdater = null;
 try {
@@ -39,6 +42,8 @@ if (!app.requestSingleInstanceLock()) {
 
 let win = null;
 let pendingShare = null;
+let tray = null;
+let quitting = false; // só fecha de verdade pelo "Sair" da bandeja (ou atualização / desligar o PC)
 
 function createWindow() {
   win = new BrowserWindow({
@@ -83,6 +88,14 @@ function createWindow() {
       win.setFullScreen(!win.isFullScreen());
     }
   });
+  // X não fecha: esconde e continua rodando na bandeja (a chamada segue)
+  win.on('close', (e) => {
+    if (quitting) return;
+    e.preventDefault();
+    win.hide();
+    trayHintOnce();
+  });
+  win.on('session-end', () => (quitting = true));
   win.on('enter-full-screen', () => send('fullscreen', true));
   win.on('leave-full-screen', () => send('fullscreen', false));
 }
@@ -203,16 +216,52 @@ function setupUpdater() {
   }, 1000 * 60 * 30);
 }
 
-app.on('second-instance', () => {
-  if (win) {
-    if (win.isMinimized()) win.restore();
-    win.focus();
-  }
-});
+function showWindow() {
+  if (!win) return;
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+}
+
+function setupTray() {
+  const img = nativeImage.createFromPath(path.join(__dirname, 'build', 'icon.png')).resize({ width: 16, height: 16 });
+  tray = new Tray(img);
+  tray.setToolTip('Especial Caçamba dos Cria');
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: 'Abrir', click: showWindow },
+      { type: 'separator' },
+      { label: 'Mutar / desmutar microfone', click: () => send('shortcut', 'mute') },
+      { label: 'Desativar / ativar áudio', click: () => send('shortcut', 'deafen') },
+      { type: 'separator' },
+      { label: 'Sair', click: () => { quitting = true; app.quit(); } },
+    ])
+  );
+  tray.on('click', showWindow);
+  tray.on('double-click', showWindow);
+}
+
+// avisa (só na primeira vez) que o app continua aberto lá na bandeja
+function trayHintOnce() {
+  const flag = path.join(app.getPath('userData'), 'tray-hint');
+  if (fs.existsSync(flag) || !tray || process.platform !== 'win32') return;
+  try {
+    fs.writeFileSync(flag, '1');
+  } catch (_) {}
+  tray.displayBalloon({
+    title: 'Ainda tô aqui!',
+    content: 'O Caçamba continua rodando perto do relógio. Pra fechar de vez: botão direito no ícone → Sair.',
+    iconType: 'info',
+  });
+}
+
+app.on('second-instance', showWindow);
+app.on('before-quit', () => (quitting = true));
 
 app.whenReady().then(() => {
   setupMedia();
   createWindow();
+  setupTray();
   setupShortcuts();
   setupUpdater();
 });
