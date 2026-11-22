@@ -28,6 +28,7 @@ import {
   arrayUnion,
   arrayRemove,
   limit,
+  orderBy,
 } from 'firebase/firestore';
 import { firebaseConfig } from './firebase-config.js';
 
@@ -198,10 +199,50 @@ export async function createServer(name, uid) {
     createdAt: serverTimestamp(),
   });
   const b = writeBatch(db);
+  b.set(doc(db, 'rooms', geralId(ref.id)), GERAL(ref.id));
   DEFAULT_ROOMS.forEach((r, i) => b.set(doc(collection(db, 'rooms')), { serverId: ref.id, name: r, order: i + 1 }));
   await b.commit();
   return ref.id;
 }
+
+// ---- canais de texto: todo servidor tem um #geral fixo (id previsível, não dá pra apagar)
+const geralId = (serverId) => `${serverId}_geral`;
+const GERAL = (serverId) => ({ serverId, name: 'geral', type: 'text', fixed: true, order: 0 });
+export async function ensureGeral(serverId) {
+  const ref = doc(db, 'rooms', geralId(serverId));
+  const snap = await getDoc(ref);
+  if (!snap.exists()) await setDoc(ref, GERAL(serverId));
+}
+export const createTextChannel = (serverId, name, order) =>
+  addDoc(collection(db, 'rooms'), { serverId, name: channelName(name), type: 'text', order });
+export const channelName = (name) =>
+  name.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^\p{L}\p{N}_-]/gu, '').slice(0, 40) || 'canal';
+
+export function watchMessages(roomId, cb) {
+  const q = query(collection(db, 'rooms', roomId, 'messages'), orderBy('ts', 'desc'), limit(150));
+  return onSnapshot(
+    q,
+    (snap) => {
+      const list = [];
+      snap.forEach((d) => {
+        const m = d.data({ serverTimestamps: 'estimate' });
+        list.push({ id: d.id, ...m, time: m.ts?.toMillis?.() || m.at || Date.now() });
+      });
+      cb(list.reverse());
+    },
+    (e) => console.error('mensagens', e)
+  );
+}
+export const sendMessage = (roomId, me, text) =>
+  addDoc(collection(db, 'rooms', roomId, 'messages'), {
+    uid: me.uid,
+    name: me.name,
+    color: me.color || null,
+    text: text.slice(0, 2000),
+    at: Date.now(),
+    ts: serverTimestamp(),
+  });
+export const deleteMessage = (roomId, id) => deleteDoc(doc(db, 'rooms', roomId, 'messages', id));
 
 export async function findServerByCode(code) {
   const snap = await getDocs(query(collection(db, 'servers'), where('code', '==', code.trim().toUpperCase()), limit(1)));
@@ -219,8 +260,8 @@ export async function deleteServer(id) {
   const rooms = await getDocs(query(collection(db, 'rooms'), where('serverId', '==', id)));
   const b = writeBatch(db);
   rooms.forEach((r) => b.delete(r.ref));
-  await b.commit().catch(() => {});
-  await deleteDoc(doc(db, 'servers', id));
+  b.delete(doc(db, 'servers', id)); // junto no mesmo lote: o #geral só pode sumir se o servidor sumir junto
+  await b.commit();
 }
 
 // ---------------- Salas ----------------

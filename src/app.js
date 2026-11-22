@@ -40,11 +40,11 @@ const DEFAULTS = {
   noiseSuppression: false,
   autoGainControl: false,
   gateEnabled: false,
-  settingsVersion: 2,
+  settingsVersion: 3,
   gateThreshold: -50,
   quality: '1080p60',
   mode: 'motion',
-  shareAudio: false,
+  shareAudio: true,
   codec: 'h264',
   uiSounds: true,
   userVolumes: {},
@@ -60,6 +60,12 @@ try {
 // v1.0.1: processamento de voz passa a vir desligado (microfone limpo); migra quem veio da 1.0.0
 if ((S.settingsVersion || 1) < 2) {
   Object.assign(S, { echoCancellation: false, noiseSuppression: false, autoGainControl: false, gateEnabled: false, settingsVersion: 2 });
+  try {
+    localStorage.setItem('cacamba.settings', JSON.stringify(S));
+  } catch (_) {}
+}
+if (S.settingsVersion < 3) {
+  Object.assign(S, { shareAudio: true, settingsVersion: 3 });
   try {
     localStorage.setItem('cacamba.settings', JSON.stringify(S));
   } catch (_) {}
@@ -102,6 +108,11 @@ const st = {
   update: null,
   unsubs: [],
   prevRoomSids: new Set(),
+  mode: 'chat', // no servidor: 'chat' (canal de texto) ou 'stage' (chamada)
+  textId: null, // canal de texto aberto
+  msgs: [],
+  msgCh: null,
+  msgUnsub: null,
 };
 let mic = null;
 let mesh = null;
@@ -144,9 +155,26 @@ function renderFsButton() {
     b.title = isFullscreen ? 'Sair da tela cheia (F11)' : 'Tela cheia (F11)';
   }
 }
+function renderWinCtl() {
+  document.body.classList.toggle('fs', isFullscreen);
+  const c = $('#win-ctl');
+  if (c && !c.dataset.ready) {
+    const [mn, fs, x] = c.querySelectorAll('button');
+    mn.innerHTML = icon('minimize', 'sm');
+    fs.innerHTML = icon('fullExit', 'sm');
+    x.innerHTML = icon('close', 'sm');
+    c.dataset.ready = '1';
+  }
+}
+bridge.isFullscreen?.().then((on) => {
+  isFullscreen = !!on;
+  renderFsButton();
+  renderWinCtl();
+});
 bridge.onFullscreen((on) => {
   isFullscreen = on;
   renderFsButton();
+  renderWinCtl();
 });
 if (S.startFullscreen) bridge.setFullscreen(true);
 renderFsButton();
@@ -368,6 +396,9 @@ function setView(view, silent = false) {
   st.roomsUnsub = null;
   st.rooms = [];
   if (view !== 'home') {
+    st.textId = null;
+    st.mode = st.roomId && st.roomServerId === view ? 'stage' : 'chat';
+    B.ensureGeral(view).catch((e) => console.warn('geral', e));
     st.roomsUnsub = B.watchRooms(view, (rooms) => {
       st.rooms = rooms;
       renderSidebar();
@@ -530,6 +561,7 @@ async function leaveRoom(silent = false) {
   out.removeAll();
   st.remote.clear();
   st.conn = {};
+  st.mode = 'chat';
   st.ping = {};
   st.roomId = null;
   st.roomServerId = null;
@@ -954,11 +986,15 @@ function renderSidebar() {
     <button class="server-head" data-act="server-menu"><b class="ellipsis">${esc(sv.name)}</b>${icon('expand', 'sm')}</button>
     <button class="btn invite-btn" data-act="invite">${icon('personAdd', 'sm')} Convidar pessoas</button>
     <div class="rooms">
+      <div class="rooms-title"><span class="label">Canais de texto</span><button data-act="add-text" title="Criar canal de texto">${icon('plus', 'sm')}</button></div>
+      ${textRooms()
+        .map((r) => `<div class="room text ${st.mode === 'chat' && currentText()?.id === r.id ? 'on' : ''}" data-act="open-text" data-room="${r.id}">${icon('hash', 'sm')}<span class="ellipsis">${esc(r.name)}</span></div>`)
+        .join('')}
       <div class="rooms-title"><span class="label">Salas de voz</span><button data-act="add-room" title="Criar sala">${icon('plus', 'sm')}</button></div>
-      ${st.rooms
+      ${voiceRooms()
         .map((r) => {
           const ms = roomMembers(r.id);
-          return `<div class="room ${st.roomId === r.id ? 'on' : ''}" data-act="join" data-room="${r.id}">${icon('voice', 'sm')}<span class="ellipsis">${esc(r.name)}</span>${ms.length ? `<span class="count">${ms.length}</span>` : ''}</div>
+          return `<div class="room ${st.roomId === r.id && st.mode === 'stage' ? 'on' : ''} ${st.roomId === r.id ? 'joined' : ''}" data-act="join" data-room="${r.id}">${icon('voice', 'sm')}<span class="ellipsis">${esc(r.name)}</span>${ms.length ? `<span class="count">${ms.length}</span>` : ''}</div>
           ${ms.length ? `<div class="room-members">${ms.map((p) => `<div class="rm" data-sid="${p.sid}">${avatar(p.name, p.color, p.sid, '', p.uid)}<span class="ellipsis">${esc(p.name)}</span>${flags(p)}</div>`).join('')}</div>` : ''}`;
         })
         .join('')}
@@ -1003,6 +1039,13 @@ function renderHead() {
     el.innerHTML = `${icon('people')}<h2>Amigos</h2><div class="head-tabs">${tabs
       .map(([k, l]) => `<button data-act="home-tab" data-tab="${k}" class="${st.homeTab === k ? 'on' : ''} ${k === 'add' ? 'green' : ''}">${l}</button>`)
       .join('')}</div><div class="grow"></div>
+      <button class="btn ghost" data-act="toggle-sb">${icon('sound', 'sm')} Soundboard</button>`;
+    return;
+  }
+  const ch = st.mode === 'chat' ? currentText() : null;
+  if (ch) {
+    el.innerHTML = `${icon('hash')}<h2>${esc(ch.name)}</h2><span class="muted" style="font-size:12px">${ch.fixed ? 'Canal geral do servidor' : 'Canal de texto'}</span><div class="grow"></div>
+      ${st.roomId ? `<button class="btn ghost" data-act="go-call">${icon('voice', 'sm')} Voltar pra chamada</button>` : ''}
       <button class="btn ghost" data-act="toggle-sb">${icon('sound', 'sm')} Soundboard</button>`;
     return;
   }
@@ -1071,7 +1114,7 @@ function renderHome(el) {
 function renderControls() {
   const el = $('#controls');
   if (!el) return;
-  if (!inCallHere()) {
+  if (!inCallHere() || st.mode !== 'stage') {
     el.innerHTML = '';
     return;
   }
@@ -1102,6 +1145,138 @@ function makeTile(key, kind) {
   return el;
 }
 
+// ---------------------------------------------------------------- canais de texto
+const isText = (r) => r.type === 'text';
+const textRooms = () => st.rooms.filter(isText);
+const voiceRooms = () => st.rooms.filter((r) => !isText(r));
+function currentText() {
+  const list = textRooms();
+  return list.find((r) => r.id === st.textId) || list.find((r) => r.fixed) || list[0] || null;
+}
+
+function stopChat() {
+  if (st.msgUnsub) st.msgUnsub();
+  st.msgUnsub = null;
+  st.msgCh = null;
+  st.msgs = [];
+}
+
+function renderChat(el) {
+  const ch = currentText();
+  if (st.msgCh !== ch.id) {
+    stopChat();
+    st.msgCh = ch.id;
+    st.msgUnsub = B.watchMessages(ch.id, (list) => {
+      if (st.msgCh !== ch.id) return;
+      st.msgs = list;
+      renderMessages();
+    });
+  }
+  const box = el.querySelector('.chat');
+  if (box && box.dataset.ch === ch.id) return; // já está montado: não apaga o que a pessoa está digitando
+  el.innerHTML = `<div class="chat" data-ch="${ch.id}">
+    <div class="msgs" id="msgs"><div class="hint" style="padding:20px">Carregando...</div></div>
+    <form class="composer" id="composer">
+      <textarea id="msg-input" rows="1" maxlength="2000" placeholder="Conversar em #${esc(ch.name)}"></textarea>
+      <button class="ibtn" type="submit" data-act="send-msg" title="Enviar (Enter)">${icon('send')}</button>
+    </form>
+  </div>`;
+  const ta = el.querySelector('#msg-input');
+  ta.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendChat();
+    }
+  });
+  ta.addEventListener('input', () => {
+    ta.style.height = 'auto';
+    ta.style.height = Math.min(ta.scrollHeight, 160) + 'px';
+  });
+  el.querySelector('#composer').addEventListener('submit', (e) => e.preventDefault());
+  renderMessages();
+  setTimeout(() => ta.focus(), 0);
+}
+
+const linkify = (text) =>
+  esc(text).replace(/https?:\/\/[^\s<]+/g, (u) => `<a href="#" data-act="open-link" data-url="${u}">${u}</a>`);
+const fmtTime = (t) => {
+  const d = new Date(t);
+  const now = new Date();
+  const hm = d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  if (d.toDateString() === now.toDateString()) return `hoje às ${hm}`;
+  const y = new Date(now);
+  y.setDate(now.getDate() - 1);
+  if (d.toDateString() === y.toDateString()) return `ontem às ${hm}`;
+  return `${d.toLocaleDateString('pt-BR')} ${hm}`;
+};
+
+function renderMessages() {
+  const box = $('#msgs');
+  if (!box) return;
+  const ch = currentText();
+  const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+  if (!st.msgs.length) {
+    box.innerHTML = `<div class="chat-empty">${icon('hash')}<h3>Bem-vindo ao #${esc(ch ? ch.name : '')}</h3><p>Ninguém falou nada ainda. Manda a primeira!</p></div>`;
+    return;
+  }
+  let html = '';
+  let prev = null;
+  for (const m of st.msgs) {
+    const grouped = prev && prev.uid === m.uid && m.time - prev.time < 5 * 60_000;
+    const mem = st.members.get(m.uid);
+    const name = mem?.name || m.name;
+    const color = mem?.color || m.color;
+    html += grouped
+      ? `<div class="msg cont" data-id="${m.id}" data-uid="${m.uid}"><span class="mt">${new Date(m.time).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</span><div class="mtext">${linkify(m.text)}</div></div>`
+      : `<div class="msg" data-id="${m.id}" data-uid="${m.uid}">${avatar(name, color, '', '', m.uid)}<div class="mbody"><div class="mhead"><b style="color:${esc(color || 'var(--text)')}">${esc(name)}</b><span class="mt">${fmtTime(m.time)}</span></div><div class="mtext">${linkify(m.text)}</div></div></div>`;
+    prev = m;
+  }
+  box.innerHTML = html;
+  if (nearBottom || box.dataset.first !== '1') {
+    box.scrollTop = box.scrollHeight;
+    box.dataset.first = '1';
+  }
+}
+
+async function sendChat() {
+  const ta = $('#msg-input');
+  const ch = currentText();
+  if (!ta || !ch) return;
+  const text = ta.value.trim();
+  if (!text) return;
+  ta.value = '';
+  ta.style.height = 'auto';
+  try {
+    await B.sendMessage(ch.id, { uid: st.user.uid, name: st.me.name, color: st.me.color }, text);
+    const box = $('#msgs');
+    if (box) box.scrollTop = box.scrollHeight;
+  } catch (e) {
+    console.error(e);
+    ta.value = text;
+    toast('Não consegui mandar a mensagem.', true);
+  }
+}
+
+function msgMenu(e, id) {
+  e.preventDefault();
+  const m = st.msgs.find((x) => x.id === id);
+  const ch = currentText();
+  if (!m || !ch) return;
+  const sv = currentServer();
+  const canDelete = m.uid === st.user.uid || sv?.ownerId === st.user.uid;
+  const c = openCtx(
+    e.clientX,
+    e.clientY,
+    `<button class="item" data-x="copy">Copiar texto</button>${canDelete ? '<button class="item danger" data-x="del">Apagar mensagem</button>' : ''}`
+  );
+  c.addEventListener('click', (ev) => {
+    const x = ev.target.dataset.x;
+    closeCtx();
+    if (x === 'copy') navigator.clipboard.writeText(m.text).then(() => toast('Copiado!'));
+    if (x === 'del') B.deleteMessage(ch.id, id).catch(() => toast('Não deu pra apagar.', true));
+  });
+}
+
 function renderStage() {
   const el = $('#stage');
   if (!el) return;
@@ -1110,6 +1285,12 @@ function renderStage() {
     stageSig = '';
     return renderHome(el);
   }
+  if ((!inCallHere() || st.mode === 'chat') && currentText()) {
+    tileEls.clear();
+    stageSig = '';
+    return renderChat(el);
+  }
+  stopChat();
   if (!inCallHere()) {
     tileEls.clear();
     stageSig = '';
@@ -1712,17 +1893,19 @@ function roomMenu(e, roomId) {
   e.preventDefault();
   const r = st.rooms.find((x) => x.id === roomId);
   if (!r) return;
+  if (r.fixed) return toast('O #geral é fixo: não dá pra renomear nem apagar.');
+  const txt = r.type === 'text';
   const c = openCtx(
     e.clientX,
     e.clientY,
-    `<div class="ctx-title">${esc(r.name)}</div>
-     <button class="item" data-x="rename">Renomear sala</button>
-     <button class="item danger" data-x="delete">Excluir sala</button>`
+    `<div class="ctx-title">${txt ? '#' : ''}${esc(r.name)}</div>
+     <button class="item" data-x="rename">Renomear ${txt ? 'canal' : 'sala'}</button>
+     <button class="item danger" data-x="delete">Excluir ${txt ? 'canal' : 'sala'}</button>`
   );
   c.addEventListener('click', async (ev) => {
     const x = ev.target.dataset.x;
     closeCtx();
-    if (x === 'rename') promptText('Renomear sala', r.name, (v) => B.renameRoom(roomId, v));
+    if (x === 'rename') promptText(txt ? 'Renomear canal' : 'Renomear sala', r.name, (v) => B.renameRoom(roomId, txt ? B.channelName(v) : v));
     if (x === 'delete') {
       if (roomMembers(roomId).length) return toast('Tem gente na sala. Espera esvaziar.');
       confirmBox(`Excluir a sala "${r.name}"?`, () => B.deleteRoom(roomId));
@@ -1824,10 +2007,31 @@ document.addEventListener('click', async (e) => {
       onSettingsClosed();
       break;
     case 'join':
+      st.mode = 'stage';
       if (st.roomId === b.dataset.room) {
         st.focus = null;
+        renderSidebar();
+        renderHead();
         renderStage();
+        renderControls();
       } else joinRoom(b.dataset.room);
+      break;
+    case 'open-text':
+      st.textId = b.dataset.room;
+      st.mode = 'chat';
+      renderSidebar();
+      renderHead();
+      renderStage();
+      renderControls();
+      break;
+    case 'add-text':
+      promptText('Novo canal de texto', '', (v) => B.createTextChannel(st.view, v, textRooms().length + 1));
+      break;
+    case 'send-msg':
+      sendChat();
+      break;
+    case 'open-link':
+      bridge.openExternal(b.dataset.url);
       break;
     case 'leave':
       leaveRoom();
@@ -1866,7 +2070,14 @@ document.addEventListener('click', async (e) => {
       if (b.dataset.view !== st.view) setView(b.dataset.view);
       break;
     case 'go-call':
-      if (st.roomServerId) setView(st.roomServerId);
+      if (st.roomServerId) {
+        if (st.view !== st.roomServerId) setView(st.roomServerId);
+        st.mode = 'stage';
+        renderSidebar();
+        renderHead();
+        renderStage();
+        renderControls();
+      }
       break;
     case 'home-tab':
       st.homeTab = b.dataset.tab;
@@ -2020,6 +2231,12 @@ document.addEventListener('click', async (e) => {
       closeModal();
       toast('Beleza. Atualiza sozinho quando você fechar o app.');
       break;
+    case 'win-min':
+      bridge.minimize?.();
+      break;
+    case 'win-close':
+      bridge.close?.();
+      break;
     case 'fullscreen-app':
       isFullscreen = await bridge.setFullscreen();
       renderFsButton();
@@ -2083,6 +2300,8 @@ document.addEventListener('input', (e) => {
 document.addEventListener('contextmenu', (e) => {
   const snd = e.target.closest('.sound');
   if (snd) return soundMenu(e, snd.dataset.id);
+  const msg = e.target.closest('.msg[data-id]');
+  if (msg) return msgMenu(e, msg.dataset.id);
   const room = e.target.closest('.room');
   if (room) return roomMenu(e, room.dataset.room);
   const who = e.target.closest('[data-sid]');

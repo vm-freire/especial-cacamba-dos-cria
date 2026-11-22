@@ -87,6 +87,11 @@ function createWindow() {
   win.on('leave-full-screen', () => send('fullscreen', false));
 }
 
+// em tela cheia o Windows esconde os botões da janela: o app desenha os dele
+ipcMain.handle('win:minimize', () => win && win.minimize());
+ipcMain.handle('win:close', () => win && win.close());
+ipcMain.handle('win:isFullscreen', () => !!(win && win.isFullScreen()));
+
 ipcMain.handle('win:fullscreen', (_e, on) => {
   if (!win) return false;
   win.setFullScreen(on === undefined ? !win.isFullScreen() : !!on);
@@ -96,7 +101,7 @@ ipcMain.handle('win:fullscreen', (_e, on) => {
 function setupMedia() {
   const ses = session.defaultSession;
   ses.setPermissionRequestHandler((_wc, permission, cb) => {
-    cb(['media', 'display-capture', 'notifications', 'clipboard-sanitized-write', 'speaker-selection'].includes(permission));
+    cb(['media', 'display-capture', 'notifications', 'clipboard-sanitized-write', 'speaker-selection', 'fullscreen'].includes(permission));
   });
   ses.setPermissionCheckHandler(() => true);
 

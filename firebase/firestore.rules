@@ -53,7 +53,21 @@ service cloud.firestore {
       allow update: if member() && inServer(resource.data.serverId)
         && request.resource.data.serverId == resource.data.serverId
         && validName(request.resource.data.name, 40);
-      allow delete: if member() && inServer(resource.data.serverId);
+      allow delete: if member() && inServer(resource.data.serverId)
+        && (resource.data.get('fixed', false) != true
+            || !existsAfter(/databases/$(db)/documents/servers/$(resource.data.serverId)));
+
+      // mensagens dos canais de texto
+      match /messages/{msg} {
+        function roomServer() { return get(/databases/$(db)/documents/rooms/$(id)).data.serverId; }
+        allow read: if member() && inServer(roomServer());
+        allow create: if member() && inServer(roomServer())
+          && request.resource.data.uid == request.auth.uid
+          && request.resource.data.text is string
+          && request.resource.data.text.size() > 0 && request.resource.data.text.size() <= 2000;
+        allow delete: if signedIn() && (resource.data.uid == request.auth.uid
+          || get(/databases/$(db)/documents/servers/$(roomServer())).data.ownerId == request.auth.uid);
+      }
     }
 
     match /notifications/{id} {
