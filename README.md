@@ -63,3 +63,29 @@ git push origin main --tags
 O GitHub Actions gera o instalador e publica no Releases; os apps instalados se atualizam sozinhos.
 
 **Site de download:** a pasta `site/` é publicada na Vercel.
+
+## 🎙️ Vozes com IA e Estúdio de Vozes
+
+**No app (todo mundo):** botão ✨ na call → seção *Vozes com IA* → clica na voz → *Baixar*. Na primeira vez baixa o motor
+(~810 MB, uma vez só); depois cada voz é um clique. Roda no próprio PC pela placa de vídeo (DirectML), sem servidor.
+O tom ajusta sozinho pro tom de quem fala. *Atualizar vozes* busca as novas sem atualizar o app.
+
+**Estúdio de Vozes (só quem tem a senha):** é um programa separado, que não vai no instalador do app.
+
+1. Num PC com [Node.js](https://nodejs.org): baixe este repositório e rode `estudio\Instalar Estudio.cmd`
+   (instala as dependências e cria o atalho **Estúdio de Vozes** na área de trabalho).
+2. No Estúdio: *Senha* → digite a senha de publicação (fica guardada criptografada só naquele PC).
+3. *+ Nova voz* → nome, foto (opcional), modelo `.onnx` (ou `.pth`, se o conversor w-okada estiver em `~/VoiceChanger`),
+   tom → *Gravar 6 s* pra ouvir como fica → *Publicar no Caçamba*.
+
+Treinar um modelo RVC: use um Colab de RVC v2 (ex.: Applio ou RVC WebUI) com ~10 min de áudio limpo da voz,
+e exporte o `.pth` (ou o `.onnx`). Modelos de terceiros em `.pth` podem conter código: use só os que você treinou.
+
+**Como a publicação funciona:** o Estúdio manda o modelo em pedaços de 4 MB para `site/api/vozes.js` (Vercel), que confere a
+senha e sobe no release `vozes` do GitHub. Nenhuma chave fica no Estúdio. Configure uma vez na Vercel
+(*Settings → Environment Variables* do projeto) e faça um redeploy:
+
+| Variável | Valor |
+| --- | --- |
+| `ESTUDIO_SENHA` | a senha que você vai digitar no Estúdio (use uma forte) |
+| `GITHUB_TOKEN` | token *fine-grained* do GitHub, só deste repositório, permissão **Contents: Read and write** |
