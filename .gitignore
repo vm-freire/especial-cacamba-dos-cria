@@ -4,3 +4,4 @@ release/
 .firebase/
 *.log
 .env
+scripts/

@@ -112,6 +112,20 @@ export async function completeProfile(user, name) {
   await updateProfile(user, { displayName: nick }).catch(() => {});
 }
 
+// contas antigas (antes do apelido único) não têm o registro do apelido: sem ele o Firebase recusa
+// qualquer mudança no perfil (foto, título, cor). Cria o registro se o apelido estiver livre.
+export async function ensureNickClaim(uid, name) {
+  if (!name) return 'ok';
+  const key = nickKey(name);
+  const snap = await getDoc(doc(db, 'usernames', key));
+  if (snap.exists()) return snap.data().uid === uid ? 'ok' : 'taken';
+  const b = writeBatch(db);
+  b.set(doc(db, 'usernames', key), { uid });
+  b.update(doc(db, 'members', uid), { nameLower: key });
+  await b.commit();
+  return 'fixed';
+}
+
 export async function changeNick(uid, oldName, newName) {
   const nick = checkNick(newName);
   if (nickKey(nick) === nickKey(oldName || '')) {
@@ -121,7 +135,10 @@ export async function changeNick(uid, oldName, newName) {
   if (await isNickTaken(nick, uid)) throw NICK_TAKEN();
   const b = writeBatch(db);
   b.set(doc(db, 'usernames', nickKey(nick)), { uid });
-  if (oldName) b.delete(doc(db, 'usernames', nickKey(oldName)));
+  if (oldName) {
+    const old = await getDoc(doc(db, 'usernames', nickKey(oldName)));
+    if (old.exists() && old.data().uid === uid) b.delete(old.ref);
+  }
   b.update(doc(db, 'members', uid), { name: nick, nameLower: nickKey(nick) });
   try {
     await b.commit();

@@ -338,6 +338,11 @@ async function afterLogin() {
   }
   if (!me) return renderProfile();
   st.me = me;
+  B.ensureNickClaim(st.user.uid, me.name)
+    .then((r) => {
+      if (r === 'taken') toast(`Teu apelido "${me.name}" tá repetido com outra conta. Troca em Configurações → Minha conta pra poder editar o perfil.`, true);
+    })
+    .catch((e) => console.warn('apelido', e));
   await startSession();
 }
 
@@ -1197,8 +1202,18 @@ function renderChat(el) {
   setTimeout(() => ta.focus(), 0);
 }
 
+// links: com http(s)://, www., ou só domínio (site.com.br, algo.app, x.me/abc...) viram botão que abre o navegador
+const TLDS = 'com|br|net|org|me|app|io|gg|tv|dev|xyz|co|info|online|site|store|link|ly|to|be|us|uk|pt|ai|so|fm|live|games|club|shop|blog|page|edu|gov|win|fun|top|art|pro|biz|cc|ws|in|es|fr|de|it|jp|ar|cl|mx';
+const LINK_RE = new RegExp(String.raw`\b((?:https?:\/\/|www\.)[^\s<]+|(?:[a-z0-9-]+\.)+(?:${TLDS})\b(?:\/[^\s<]*)?)`, 'gi');
 const linkify = (text) =>
-  esc(text).replace(/https?:\/\/[^\s<]+/g, (u) => `<a href="#" data-act="open-link" data-url="${u}">${u}</a>`);
+  esc(text).replace(LINK_RE, (m, _g, at, all) => {
+    if (all[at - 1] === '@') return m; // e-mail, não link
+    const trail = (m.match(/[.,!?;:)\]]+$/) || [''])[0];
+    const u = trail ? m.slice(0, -trail.length) : m;
+    if (/@/.test(u)) return m;
+    const href = /^https?:\/\//i.test(u) ? u : 'https://' + u;
+    return `<a href="#" data-act="open-link" data-url="${href}" title="${href}">${u}</a>${trail}`;
+  });
 const fmtTime = (t) => {
   const d = new Date(t);
   const now = new Date();
@@ -1776,40 +1791,138 @@ function inviteFriendPicker(uid) {
 
 // escolhe uma imagem, recorta quadrada 160x160 e salva como JPEG pequeno (~15 KB)
 function pickServerIcon(serverId) {
-  pickImage(160, async (data) => {
-    await B.setServerIcon(serverId, data);
-    toast('Foto do servidor trocada!');
-  });
+  pickImage(
+    160,
+    async (data) => {
+      await B.setServerIcon(serverId, data);
+      toast('Foto do servidor trocada!');
+    },
+    { title: 'Foto do servidor' }
+  );
 }
 
 // escolhe uma imagem, recorta quadrada (size x size) e entrega um JPEG pequeno em data URL
-function pickImage(size, onData) {
+function pickImage(size, onData, { round = false, title = 'Ajustar imagem', after = null } = {}) {
   const input = document.createElement('input');
   input.type = 'file';
   input.accept = 'image/*';
   input.onchange = async () => {
     const file = input.files[0];
     if (!file) return;
+    let img;
+    const url = URL.createObjectURL(file);
     try {
-      const url = URL.createObjectURL(file);
-      const img = await new Promise((res, rej) => {
+      img = await new Promise((res, rej) => {
         const im = new Image();
         im.onload = () => res(im);
-        im.onerror = rej;
+        im.onerror = () => rej(new Error('formato'));
         im.src = url;
       });
-      const c = document.createElement('canvas');
-      c.width = c.height = size;
-      const side = Math.min(img.naturalWidth, img.naturalHeight);
-      c.getContext('2d').drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, size, size);
-      URL.revokeObjectURL(url);
-      await onData(c.toDataURL('image/jpeg', 0.85));
     } catch (e) {
-      console.error(e);
-      toast('Não consegui usar essa imagem.', true);
+      URL.revokeObjectURL(url);
+      return toast('Esse formato de imagem não abriu. Tenta JPG, PNG, WEBP ou GIF.', true);
     }
+    cropImage(img, url, size, { round, title, after }, onData);
   };
   input.click();
+}
+
+// janela de recorte: arrasta pra posicionar, roda/slider pra zoom, grade de 3x3 pra ajudar
+function cropImage(img, url, size, { round, title, after }, onData) {
+  const V = 320;
+  const W = img.naturalWidth;
+  const H = img.naturalHeight;
+  const minS = V / Math.min(W, H);
+  let s = minS;
+  let x = (V - W * s) / 2;
+  let y = (V - H * s) / 2;
+  const m = openModal(`
+    <div class="modal-head"><h3>${esc(title)}</h3><button class="ibtn" data-act="crop-cancel">${icon('close')}</button></div>
+    <div class="crop-wrap">
+      <div class="crop-view ${round ? 'round' : ''}" style="width:${V}px;height:${V}px"><img src="${url}" alt="" draggable="false"/><div class="crop-grid"></div></div>
+      <div class="row crop-zoom"><span class="muted">−</span><input type="range" min="100" max="400" value="100" id="crop-z"/><span class="muted">+</span></div>
+      <div class="hint">Arrasta a imagem pra escolher o pedaço. Use a rodinha do mouse ou a barra pra dar zoom.</div>
+      <div class="row" style="justify-content:flex-end;margin-top:12px"><button class="btn ghost" data-act="crop-cancel">Cancelar</button><button class="btn primary" data-act="crop-save">Salvar</button></div>
+    </div>`);
+  const view = m.querySelector('.crop-view');
+  const im = view.querySelector('img');
+  const z = m.querySelector('#crop-z');
+  const clamp = () => {
+    x = Math.min(0, Math.max(V - W * s, x));
+    y = Math.min(0, Math.max(V - H * s, y));
+  };
+  const draw = () => {
+    clamp();
+    im.style.width = W * s + 'px';
+    im.style.height = H * s + 'px';
+    im.style.transform = `translate(${x}px, ${y}px)`;
+  };
+  const zoomTo = (ns, cx = V / 2, cy = V / 2) => {
+    ns = Math.max(minS, Math.min(minS * 4, ns));
+    x = cx - ((cx - x) * ns) / s;
+    y = cy - ((cy - y) * ns) / s;
+    s = ns;
+    z.value = Math.round((s / minS) * 100);
+    draw();
+  };
+  draw();
+  let drag = null;
+  view.addEventListener('pointerdown', (e) => {
+    drag = { px: e.clientX, py: e.clientY, x, y };
+    view.setPointerCapture(e.pointerId);
+    view.classList.add('drag');
+  });
+  view.addEventListener('pointermove', (e) => {
+    if (!drag) return;
+    x = drag.x + e.clientX - drag.px;
+    y = drag.y + e.clientY - drag.py;
+    draw();
+  });
+  const end = () => {
+    drag = null;
+    view.classList.remove('drag');
+  };
+  view.addEventListener('pointerup', end);
+  view.addEventListener('pointercancel', end);
+  view.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const r = view.getBoundingClientRect();
+    zoomTo(s * (e.deltaY < 0 ? 1.1 : 1 / 1.1), e.clientX - r.left, e.clientY - r.top);
+  }, { passive: false });
+  z.addEventListener('input', () => zoomTo((minS * z.value) / 100));
+  const finish = () => {
+    URL.revokeObjectURL(url);
+    closeModal();
+    if (after) after();
+  };
+  m.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-act]');
+    if (!b) return;
+    if (b.dataset.act === 'crop-cancel') {
+      e.stopPropagation();
+      finish();
+    }
+    if (b.dataset.act === 'crop-save') {
+      e.stopPropagation();
+      const c = document.createElement('canvas');
+      c.width = c.height = size;
+      const g = c.getContext('2d');
+      g.fillStyle = '#111214';
+      g.fillRect(0, 0, size, size);
+      g.imageSmoothingQuality = 'high';
+      g.drawImage(img, -x / s, -y / s, V / s, V / s, 0, 0, size, size);
+      const data = c.toDataURL('image/jpeg', 0.88);
+      b.disabled = true;
+      try {
+        await onData(data);
+        finish();
+      } catch (err) {
+        console.error(err);
+        b.disabled = false;
+        toast(err && err.code === 'permission-denied' ? 'O servidor recusou salvar. Fecha e abre o app de novo e tenta outra vez.' : 'Não consegui salvar a imagem.', true);
+      }
+    }
+  });
 }
 
 function serverMenu(btn) {
@@ -1997,7 +2110,7 @@ document.addEventListener('click', async (e) => {
       renderAuth();
       break;
     case 'overlay':
-      if (e.target === b) {
+      if (e.target === b && !b.querySelector('.crop-view')) {
         closeModal();
         onSettingsClosed();
       }
@@ -2189,13 +2302,16 @@ document.addEventListener('click', async (e) => {
       break;
     }
     case 'pick-photo':
-      pickImage(256, async (data) => {
-        await B.updateMember(st.user.uid, { photo: data });
-        st.me.photo = data;
-        toast('Foto de perfil trocada!');
-        openSettings('account');
-        renderUserPanel();
-      });
+      pickImage(
+        256,
+        async (data) => {
+          await B.updateMember(st.user.uid, { photo: data });
+          st.me.photo = data;
+          toast('Foto de perfil trocada!');
+          renderUserPanel();
+        },
+        { round: true, title: 'Foto de perfil', after: () => openSettings('account') }
+      );
       break;
     case 'remove-photo':
       await B.updateMember(st.user.uid, { photo: null }).catch(() => {});
