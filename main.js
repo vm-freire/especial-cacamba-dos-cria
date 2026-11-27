@@ -130,7 +130,14 @@ function setupMedia() {
       });
       const src = sources.find((s) => s.id === sel.id);
       if (!src) return callback({});
-      if (sel.audio && process.platform === 'win32') callback({ video: src, audio: 'loopback' });
+      // som do PC SEM o som do próprio app: senão a voz dos amigos (tocada aqui) volta pela tela e eles se escutam
+      if (sel.audio && process.platform === 'win32') {
+        try {
+          callback({ video: src, audio: 'loopbackWithoutChrome' });
+        } catch (_) {
+          callback({ video: src, audio: 'loopback' });
+        }
+      }
       else callback({ video: src });
     } catch (err) {
       console.error(err);
